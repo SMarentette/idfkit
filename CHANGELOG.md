@@ -20,6 +20,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and still take precedence
   ([b6be03c](https://github.com/idfkit/idfkit/commit/b6be03c)).
 
+## [1.0.0-rc.4] - 2026-09-08
+
+This release moves to `conformance-2026.12` and `governance-2026.17`. The corpus
+level changes no case: 69 cases and 211 assertions, as `conformance-2026.11` had.
+What it adds is the first member of `checks/`, a directory the corpus contract has
+reserved since the corpus landed: `weather-monthly` holds each library's monthly
+figures against the summary the EnergyPlus Weather Converter produced from the same
+archive. `governance-2026.17` adds one capability row and renames nothing.
+
+The reader below is the first capability in the unification whose cross-language
+claim had no `ConvertInputFormat` expectation available. It ships in both languages
+on one date, so the parity ledger records it complete on both sides and never passes
+through a state where one has it and the other does not.
+
+### Added
+
+- **A reader for the EPW text this library already downloads.** `parse_epw(text)`
+  returns the header records and the hourly table as named columns; `load_epw(path)`
+  reads one off disk.
+
+  A measurement the file says was not taken reads as `nan` rather than as the value
+  the format reserves for it, per field and per value: ceiling height's 77777 is an
+  unlimited ceiling and stays a number where its 99999 does not.
+
+  `monthly_means(file, field)` returns twelve means that exclude absent hours from
+  the sum and from the divisor alike, each carrying the count of hours it used.
+
+  ([#204](https://github.com/idfkit/idfkit/pull/204))
+
+- **Two climate zone keys on `StationIndex.filter()`.** `climate_zone` selects
+  stations by ASHRAE zone code, matched against the code parsed out of
+  `WeatherStation.ashrae_climate_zone` rather than against that label's text.
+  The label is not a code: 2,162 of the 69,638 shipped records read
+  `7A - ASHRAE Climate Zone could not be determined` or `8A - ...`, and neither
+  7A nor 8A is an ASHRAE zone, since zones 7 and 8 carry no suffix. Keying on
+  the label's first token would invent two zones holding 3.1% of the index, so
+  those records match no zone.
+
+  `climate_zone_determined` is what keeps them reachable. `False` returns
+  exactly those 2,162 records and `True` returns the rest, so every station is
+  reachable through one of the two. It is a separate parameter rather than a
+  reserved `climate_zone` value, because that parameter's domain is already
+  strings and a magic one could not be told from a real code.
+
+  ([#203](https://github.com/idfkit/idfkit/pull/203))
+
+### Fixed
+
+- **The station browser's zone dropdown offered 7A and 8A as ASHRAE zones.** It
+  parsed the zone as the label's first token, so it listed twenty-one zones
+  where there are nineteen, and the two extras were the 2,162 records whose zone
+  upstream could not determine, split into two buckets by a prefix that means
+  nothing. It now lists the nineteen real zones plus one entry reading
+  `Zone could not be determined`, which returns all 2,162. This is the same
+  defect the new filter keys exist to prevent, in the page that reads the same
+  field. ([#203](https://github.com/idfkit/idfkit/pull/203))
+
 ## [1.0.0-rc.3] - 2026-09-06
 
 This release moves to `conformance-2026.11` and `governance-2026.15`. The corpus
@@ -681,7 +738,8 @@ Initial public release.
 - Performance benchmarks comparing idfkit against eppy and opyplus. ([#5](https://github.com/idfkit/idfkit/pull/5))
 - MkDocs Material documentation site with a full API reference, an eppy migration guide, and a getting-started Jupyter notebook. ([#2](https://github.com/idfkit/idfkit/pull/2))
 
-[Unreleased]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.3...HEAD
+[Unreleased]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.4]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.1...v1.0.0-rc.2
 [1.0.0-rc.1]: https://github.com/idfkit/idfkit/compare/v0.15.0...v1.0.0-rc.1

@@ -22,6 +22,26 @@ check-conformance-level: ## Verify the exported CONFORMANCE_LEVEL matches the de
 	@git diff --exit-code src/idfkit/_conformance.py || \
 		(echo "❌ idfkit.CONFORMANCE_LEVEL is stale against [tool.idfkit.conformance] in pyproject.toml. Run: uv run python -m idfkit.codegen.generate_conformance" && exit 1)
 
+# Where the shared corpus and governance artefacts live. Three gates read out of this checkout at
+# the tag pinned in pyproject.toml, never from its working tree: the naming register, the parity
+# ledger, and the EPW reserved-value table under checks/.
+CONFORMANCE_REPO ?= ../idfkit-conformance
+
+.PHONY: check-epw-sentinels
+check-epw-sentinels: ## Verify the generated EPW reserved-value table matches the corpus at the pinned level
+# Skips without the corpus, like check-naming and check-parity below and for the same reason: the
+# table is read at the pinned conformance tag out of a sibling checkout, and a developer without
+# one should not be blocked by a gate that has nothing to read. The enforcement is in
+# .github/workflows/conformance.yml, which checks the corpus out at that tag, so CI still blocks.
+	@if [ -d "$(CONFORMANCE_REPO)/.git" ]; then \
+		echo "🚀 Checking the generated EPW reserved-value table against the corpus"; \
+		uv run python -m idfkit.codegen.generate_epw_sentinels --corpus $(CONFORMANCE_REPO); \
+		git diff --exit-code src/idfkit/weather/_epw_sentinels.py || \
+			(echo "❌ src/idfkit/weather/_epw_sentinels.py is stale against checks/weather-monthly/sentinels.toml. Run: uv run python -m idfkit.codegen.generate_epw_sentinels" && exit 1); \
+	else \
+		echo "⏭️  Skipping EPW reserved-value table check ($(CONFORMANCE_REPO) not found)"; \
+	fi
+
 .PHONY: check-doc-locations
 check-doc-locations: ## Verify doc_locations.json is up-to-date (requires idfkit-docs build)
 	@if [ -d "../idfkit-docs/dist" ]; then \
@@ -39,10 +59,6 @@ check-baker: ## Verify bundled agent references match their source templates + s
 	@uv run python -m idfkit.codegen.bake_references
 	@git diff --exit-code src/idfkit/.agents/skills/developing-with-idfkit || \
 		(echo "❌ Bundled agent references are out of date. Run: uv run python -m idfkit.codegen.bake_references" && exit 1)
-
-# Where the shared governance artefacts live. Both gates read naming.toml and parity.toml out of
-# this checkout at the tag pinned in pyproject.toml, never from its working tree.
-CONFORMANCE_REPO ?= ../idfkit-conformance
 
 .PHONY: check-naming
 check-naming: ## Check the public surface against the pinned naming register
@@ -67,7 +83,7 @@ check-parity: ## Check the parity ledger against the exported capability set
 # sibling clone; it never masks a verdict, and CI never takes it, because the naming and parity
 # jobs in .github/workflows/conformance.yml check the corpus out themselves and block on the result.
 .PHONY: check
-check: check-stubs check-conformance-level check-doc-locations check-baker check-naming check-parity ## Run code quality tools.
+check: check-stubs check-conformance-level check-epw-sentinels check-doc-locations check-baker check-naming check-parity ## Run code quality tools.
 	@echo "🚀 Checking lock file consistency with 'pyproject.toml'"
 	@uv lock --locked
 	@echo "🚀 Linting code: Running pre-commit"
