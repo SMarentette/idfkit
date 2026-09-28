@@ -7,14 +7,16 @@ examples with special uppercase in name
 from __future__ import annotations
 
 import collections
+import gc
 import pickle
+import weakref
 
 import pytest
 
 from idfkit import IDFDocument, new_document
 from idfkit._accessors import AccessorAttributeError, AccessorResolver, pluralize, snake_case
 from idfkit.objects import IDFCollection
-from idfkit.schema import get_schema
+from idfkit.schema import get_schema, get_schema_manager
 from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
 
 # --------------------------------------------------------------------------
@@ -186,6 +188,30 @@ def test_document_without_schema_falls_back() -> None:
     doc = IDFDocument(version=LATEST_VERSION)  # no schema
     with pytest.raises(AttributeError):
         _ = doc.air_loop_hvacs
+
+
+def test_resolver_is_built_once_per_schema() -> None:
+    doc = new_document(version=LATEST_VERSION)
+    first = doc._accessor_resolver_or_none()
+    assert first is not None
+    assert doc._accessor_resolver_or_none() is first
+    assert new_document(version=LATEST_VERSION)._accessor_resolver_or_none() is first  # same cached schema
+
+
+def test_schema_is_collectable_after_accessor_use() -> None:
+    """The resolver must not pin its schema once the schema manager lets go of it.
+
+    Uses the oldest bundled version so no shared fixture holds the same schema.
+    """
+    doc = new_document(version=ENERGYPLUS_VERSIONS[0])
+    _ = doc.air_loop_hvacs  # forces the resolver to build
+    ref = weakref.ref(doc.schema)
+
+    del doc, _
+    get_schema_manager().clear_cache()
+    gc.collect()
+
+    assert ref() is None, "schema still pinned after clear_cache()"
 
 
 # --------------------------------------------------------------------------
