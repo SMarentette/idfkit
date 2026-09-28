@@ -29,7 +29,6 @@ _IRREGULAR_PLURALS = {"people": "people"}
 _SPLIT_BEFORE_WORD = re.compile(r"(.)([A-Z][a-z]+)")
 _SPLIT_AFTER_LOWER = re.compile(r"([a-z0-9])([A-Z])")
 _COLLAPSE = re.compile(r"_+")
-_NON_ALNUM = re.compile(r"[^a-z0-9]")
 
 
 def snake_case(obj_type: str) -> str:
@@ -87,15 +86,20 @@ def pluralize(singular: str) -> str:
     return singular + "s"
 
 
-def _key(name: str) -> str:
-    """Normalise any spelling to a comparable key.
+def _raw_key(obj_type: str) -> str:
+    """Key for a raw type name used as an attribute.
 
-    This is what removes the need for acronym knowledge in the reverse direction:
-    ``"air_loop_hvacs"`` and ``"AirLoopHVAC"`` both reduce to ``"airloophvac"`` (well,
-    ``"airloophvacs"`` for the plural -- the plural, singular and raw forms are all
-    registered as keys for each type).
+    Case-insensitive, matching idfkit's own type lookup. Only ``:`` is stripped,
+    never ``_``, so ``z_o_n_e`` cannot reach ``Zone``.
+
+    >>> _raw_key("AirLoopHVAC")
+    'airloophvac'
+    >>> _raw_key("Coil:Cooling:DX:SingleSpeed")
+    'coilcoolingdxsinglespeed'
+    >>> _raw_key("z_o_n_e")
+    'z_o_n_e'
     """
-    return _NON_ALNUM.sub("", name.lower())
+    return obj_type.replace(":", "").lower()
 
 
 class AccessorResolver:
@@ -103,38 +107,39 @@ class AccessorResolver:
 
     Build once per schema and cache it on the schema (see
     :meth:`~idfkit.schema.EpJSONSchema.accessor_resolver`); construction is
-    O(number of object types) and lookup is a dict hit.
+    O(number of object types) and lookup is at most two dict hits.
     """
 
     def __init__(self, obj_types: Iterable[str]) -> None:
         self.attr_for: dict[str, str] = {}
-        self._index: dict[str, str] = {}
+        # snake_case plural and singular, matched exactly
+        self._exact: dict[str, str] = {}
+        # Raw type names, case-insensitive, with only ':' stripped
+        self._raw: dict[str, str] = {}
 
         for obj_type in obj_types:
             singular = snake_case(obj_type)
-            attr = pluralize(singular)
-            self.attr_for[obj_type] = attr
-            # Accept the canonical plural, the singular, and the raw object type.
-            for alias in (attr, singular, obj_type):
-                self._index.setdefault(_key(alias), obj_type)
+            plural = pluralize(singular)
+            self.attr_for[obj_type] = plural
+            for alias in (plural, singular):
+                self._exact.setdefault(alias, obj_type)
+            self._raw.setdefault(_raw_key(obj_type), obj_type)
 
     def resolve(self, attr: str) -> str | None:
-        """Return the object type for an attribute name, or ``None``."""
-        return self._index.get(_key(attr))
+        """Return the object type an attribute name refers to, or ``None``.
+
+        Snake_case forms match exactly. Raw type names match case-insensitively,
+        so ``doc.ZONE`` works like ``doc["ZONE"]``, but separator noise such as
+        ``doc.z_o_n_e`` or ``doc.zone_`` does not resolve.
+        """
+        hit = self._exact.get(attr)
+        if hit is not None:
+            return hit
+        return self._raw.get(_raw_key(attr))
 
     def suggest(self, attr: str, n: int = 3) -> list[str]:
         """Closest canonical attribute names, for an ``AttributeError`` message."""
-        matches = difflib.get_close_matches(_key(attr), self._index.keys(), n=n * 2, cutoff=0.6)
-        seen: set[str] = set()
-        out: list[str] = []
-        for m in matches:
-            canonical = self.attr_for[self._index[m]]
-            if canonical not in seen:
-                seen.add(canonical)
-                out.append(canonical)
-            if len(out) >= n:
-                break
-        return out
+        return difflib.get_close_matches(attr.lower(), list(self.attr_for.values()), n=n, cutoff=0.6)
 
 
 class AccessorAttributeError(AttributeError):

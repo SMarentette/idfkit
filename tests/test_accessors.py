@@ -109,8 +109,26 @@ def test_canonical_attribute_names(resolver: AccessorResolver) -> None:
 
 
 def test_plural_singular_and_raw_all_resolve(resolver: AccessorResolver) -> None:
-    for form in ("air_loop_hvacs", "air_loop_hvac", "AirLoopHVAC", "airloophvacs"):
+    for form in ("air_loop_hvacs", "air_loop_hvac", "AirLoopHVAC", "airloophvac", "AIRLOOPHVAC"):
         assert resolver.resolve(form) == "AirLoopHVAC"
+
+
+def test_raw_name_with_colons_resolves(resolver: AccessorResolver) -> None:
+    assert resolver.resolve("Coil:Cooling:DX:SingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
+    assert resolver.resolve("CoilCoolingDXSingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
+
+
+@pytest.mark.parametrize(
+    "bad", ["z_o_n_e", "zone_", "zone_s", "_zone", "airloophvacs", "air_loophvacs", "AIR_LOOP_HVACS"]
+)
+def test_separator_noise_does_not_resolve(resolver: AccessorResolver, bad: str) -> None:
+    assert resolver.resolve(bad) is None
+
+
+def test_case_never_changes_which_type(resolver: AccessorResolver) -> None:
+    """No string resolves to one type while its re-cased twin resolves to another."""
+    clashes = [k for k in resolver._raw if k in resolver._exact and resolver._exact[k] != resolver._raw[k]]
+    assert not clashes
 
 
 def test_unknown_resolves_to_none(resolver: AccessorResolver) -> None:
@@ -179,6 +197,28 @@ def test_document_resolves_arbitrary_type_by_attribute() -> None:
     assert len(doc.coil_cooling_dx_single_speeds) == 0
 
 
+@pytest.mark.parametrize("good", ["zones", "zone", "Zone", "ZONE"])
+def test_document_documented_forms_resolve(empty_doc: IDFDocument, good: str) -> None:
+    # An empty type hands back a fresh collection each time, so compare the type, not identity.
+    assert getattr(empty_doc, good).obj_type == "Zone"
+
+
+def test_document_z_o_n_e_does_not_resolve(empty_doc: IDFDocument) -> None:
+    """From the #202 review: "tighten _key a bit (doc.z_o_n_e shouldn't resolve)".
+
+    Underscores are never stripped, so interleaving them through a type name is a
+    typo that fails loudly instead of silently returning ``Zone``.
+    """
+    assert empty_doc.zones.obj_type == "Zone"  # the real name still works
+    with pytest.raises(AttributeError, match="z_o_n_e"):
+        _ = empty_doc.z_o_n_e
+
+
+@pytest.mark.parametrize("bad", ["z_o_n_e", "zone_", "zone_s", "airloophvacs"])
+def test_document_separator_noise_does_not_resolve(empty_doc: IDFDocument, bad: str) -> None:
+    assert not hasattr(empty_doc, bad)
+
+
 def test_document_attribute_error_suggests(empty_doc: IDFDocument) -> None:
     with pytest.raises(AttributeError, match="Did you mean"):
         _ = empty_doc.zonez
@@ -240,6 +280,12 @@ def test_every_type_resolves_from_every_alias_form(all_obj_types: list[str]) -> 
             if r.resolve(form) != obj_type:
                 failures.append((obj_type, form, r.resolve(form)))
     assert not failures, f"{len(failures)} alias failures, first 10: {failures[:10]}"
+
+
+def test_case_never_changes_which_type_in_any_schema(all_obj_types: list[str]) -> None:
+    r = AccessorResolver(all_obj_types)
+    clashes = {k: (r._exact[k], r._raw[k]) for k in r._raw if k in r._exact and r._exact[k] != r._raw[k]}
+    assert not clashes, f"re-casing changes the type: {clashes}"
 
 
 def test_attribute_names_are_valid_identifiers(all_obj_types: list[str]) -> None:
