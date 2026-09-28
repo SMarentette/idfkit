@@ -7,11 +7,12 @@ examples with special uppercase in name
 from __future__ import annotations
 
 import collections
+import pickle
 
 import pytest
 
 from idfkit import IDFDocument, new_document
-from idfkit._accessors import AccessorResolver, pluralize, snake_case
+from idfkit._accessors import AccessorAttributeError, AccessorResolver, pluralize, snake_case
 from idfkit.objects import IDFCollection
 from idfkit.schema import get_schema
 from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
@@ -121,8 +122,7 @@ def test_suggestions_on_typo(resolver: AccessorResolver) -> None:
 
 
 def test_attribute_error_names_the_intent(resolver: AccessorResolver) -> None:
-    err = resolver.attribute_error("Document", "zonez")
-    msg = str(err)
+    msg = str(AccessorAttributeError("Document", "zonez", resolver))
     assert "zonez" in msg
     assert "Did you mean" in msg
     assert "zones" in msg
@@ -130,8 +130,36 @@ def test_attribute_error_names_the_intent(resolver: AccessorResolver) -> None:
 
 
 def test_attribute_error_stays_plain_when_nothing_is_close(resolver: AccessorResolver) -> None:
-    msg = str(resolver.attribute_error("Document", "qqqqqqqqqq"))
+    msg = str(AccessorAttributeError("Document", "qqqqqqqqqq", resolver))
     assert "Did you mean" not in msg
+
+
+def test_attribute_error_without_resolver_is_plain() -> None:
+    assert str(AccessorAttributeError("Document", "zonez")) == "'Document' object has no attribute 'zonez'"
+
+
+def test_attribute_error_is_an_attribute_error(resolver: AccessorResolver) -> None:
+    err = AccessorAttributeError("Document", "zonez", resolver)
+    assert isinstance(err, AttributeError)
+    assert err.name == "zonez"
+
+
+def test_attribute_error_pickles_as_plain_attribute_error(resolver: AccessorResolver) -> None:
+    """Crossing a process boundary must not fail on the three-argument __init__."""
+    restored = pickle.loads(pickle.dumps(AccessorAttributeError("Document", "zonez", resolver)))  # noqa: S301
+    assert type(restored) is AttributeError
+    assert "zones" in str(restored)
+
+
+def test_hasattr_never_computes_suggestions(empty_doc: IDFDocument, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Deterministic rather than timed: a silent probe must never reach suggest()."""
+
+    def boom(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("suggest() ran on a silent probe")  # noqa: TRY003
+
+    monkeypatch.setattr(AccessorResolver, "suggest", boom)
+    assert hasattr(empty_doc, "definitely_not_a_type") is False
+    assert getattr(empty_doc, "definitely_not_a_type", None) is None
 
 
 # --------------------------------------------------------------------------

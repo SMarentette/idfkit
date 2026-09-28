@@ -15,14 +15,10 @@ from __future__ import annotations
 import difflib
 import re
 from collections.abc import Iterable
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from .schema import EpJSONSchema
 
 __all__ = [
+    "AccessorAttributeError",
     "AccessorResolver",
-    "accessor_resolver",
     "pluralize",
     "snake_case",
 ]
@@ -105,8 +101,9 @@ def _key(name: str) -> str:
 class AccessorResolver:
     """Maps attribute names to object types for one schema.
 
-    Build once per schema and cache it (see :func:`accessor_resolver`); construction
-    is O(number of object types) and lookup is a dict hit.
+    Build once per schema and cache it on the schema (see
+    :meth:`~idfkit.schema.EpJSONSchema.accessor_resolver`); construction is
+    O(number of object types) and lookup is a dict hit.
     """
 
     def __init__(self, obj_types: Iterable[str]) -> None:
@@ -139,30 +136,41 @@ class AccessorResolver:
                 break
         return out
 
-    def attribute_error(self, owner: str, attr: str) -> AttributeError:
-        """Build an ``AttributeError`` that names the likely intent.
 
-        The schema knows what the user probably meant, so the error says it rather
-        than leaving them to guess at casing and plurality.
-        """
-        suggestions = self.suggest(attr)
-        if not suggestions:
-            return AttributeError(f"{owner!r} object has no attribute {attr!r}")
-        width = max(len(s) for s in suggestions)
-        lines = "\n".join(f"  {s:<{width}}  ({self.resolve(s)})" for s in suggestions)
-        return AttributeError(f"{owner!r} object has no attribute {attr!r}.\nDid you mean:\n{lines}")
+class AccessorAttributeError(AttributeError):
+    """``AttributeError`` whose "Did you mean" suggestions are computed only when read.
 
+    ``hasattr()`` and ``getattr(obj, name, default)`` catch this without ever
+    calling ``__str__``, so the difflib cost is never paid on a silent probe.
 
-# Cache one resolver per schema object
-_RESOLVER_CACHE: dict[int, tuple[EpJSONSchema, AccessorResolver]] = {}
+    Pickles as a plain ``AttributeError`` carrying the final message, so it
+    survives a trip from a worker process without shipping the resolver.
+    """
 
+    def __init__(self, owner: str, attr: str, resolver: AccessorResolver | None = None) -> None:
+        super().__init__(attr)
+        self.name = attr  # the standard AttributeError.name, typed str | None by the base class
+        self._attr = attr  # a plain str copy for our own use, so pyright strict is satisfied
+        self._owner = owner
+        self._resolver = resolver
+        self._message: str | None = None
 
-def accessor_resolver(schema: EpJSONSchema) -> AccessorResolver:
-    """Return the (cached) :class:`AccessorResolver` for *schema*."""
-    key = id(schema)
-    hit = _RESOLVER_CACHE.get(key)
-    if hit is not None and hit[0] is schema:
-        return hit[1]
-    resolver = AccessorResolver(schema.object_types)
-    _RESOLVER_CACHE[key] = (schema, resolver)
-    return resolver
+    def __str__(self) -> str:
+        if self._message is None:
+            self._message = self._build()
+        return self._message
+
+    def __reduce__(self) -> tuple[type[AttributeError], tuple[str]]:
+        # Rebuilding from self.args would call __init__ with one argument and fail.
+        return (AttributeError, (str(self),))
+
+    def _build(self) -> str:
+        base = f"{self._owner!r} object has no attribute {self._attr!r}"
+        if self._resolver is None:
+            return base
+        hits = self._resolver.suggest(self._attr)
+        if not hits:
+            return base
+        width = max(len(h) for h in hits)
+        lines = "\n".join(f"  {h:<{width}}  ({self._resolver.resolve(h)})" for h in hits)
+        return f"{base}.\nDid you mean:\n{lines}"

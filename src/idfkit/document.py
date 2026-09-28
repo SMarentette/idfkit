@@ -18,7 +18,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 
-from ._accessors import accessor_resolver
+from ._accessors import AccessorAttributeError, AccessorResolver
 from ._compat import EppyDocumentMixin
 from .cst import CSTNode, DocumentCST, SourceSpan
 from .exceptions import DuplicateObjectError, UnknownObjectTypeError, ValidationFailedError
@@ -108,6 +108,11 @@ _PYTHON_TO_IDF = {
 
 # Inverse mapping
 _IDF_TO_PYTHON = {v.upper(): k for k, v in _PYTHON_TO_IDF.items()}
+
+
+def _build_resolver(schema: EpJSONSchema) -> AccessorResolver:
+    """Build the attribute resolver for *schema*; cached on the schema itself."""
+    return AccessorResolver(schema.object_types)
 
 
 class IDFDocument(EppyDocumentMixin, Generic[Strict]):
@@ -423,12 +428,12 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
             return self[obj_type]
 
         # Schema-driven resolution: any object type, as plural/singular/raw name.
-        if self._schema is not None:
-            resolver = accessor_resolver(self._schema)
+        resolver = self._accessor_resolver_or_none()
+        if resolver is not None:
             resolved = resolver.resolve(name)
             if resolved is not None:
                 return self[resolved]
-            raise resolver.attribute_error(type(self).__name__, name)
+            raise AccessorAttributeError(type(self).__name__, name, resolver)
 
         # No schema: fall back to a case-insensitive match on existing collections.
         for key in self._collections:
@@ -436,6 +441,13 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
                 return self._collections[key]
 
         raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")  # noqa: TRY003
+
+    def _accessor_resolver_or_none(self) -> AccessorResolver | None:
+        """Return the schema's attribute resolver, or ``None`` without a schema."""
+        schema = self._schema
+        if schema is None:
+            return None
+        return schema.accessor_resolver(_build_resolver)
 
     def __contains__(self, obj_type: str) -> bool:
         """Check if document has objects of a type.
