@@ -105,7 +105,7 @@ _PYTHON_TO_IDF = {
     "construction_window": "Construction",
 }
 
-# Inverse mapping, we can probably remove this?
+# Inverse mapping
 _IDF_TO_PYTHON = {v.upper(): k for k, v in _PYTHON_TO_IDF.items()}
 
 
