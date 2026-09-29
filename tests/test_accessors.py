@@ -395,3 +395,80 @@ def test_no_attribute_name_shadows_a_document_member(all_obj_types: list[str]) -
     r = AccessorResolver(all_obj_types)
     clashes = {a: t for t, a in r.attr_for.items() if a in reserved}
     assert not clashes, f"accessor names shadow IDFDocument members: {clashes}"
+
+
+# --------------------------------------------------------------------------
+# Sweeps through the real document, in every bundled schema
+#
+# The sweeps above build AccessorResolver directly, with no shorthands and no
+# reserved names, so they never see the precedence rules document.py applies.
+# That is how shading_building and version slipped through review. These go
+# through getattr on a real document instead, and check every alias, not only
+# the canonical plural.
+# --------------------------------------------------------------------------
+
+# Names a real IDFDocument member owns. Adding to this set is a deliberate,
+# reviewed act; a new EnergyPlus release introducing a clash fails here first.
+EXPECTED_MEMBER_CONFLICTS = {"version"}
+
+
+@pytest.fixture(params=ENERGYPLUS_VERSIONS, ids=lambda v: f"{v[0]}.{v[1]}.{v[2]}")
+def version_doc(request: pytest.FixtureRequest) -> IDFDocument:
+    version: tuple[int, int, int] = request.param
+    return new_document(version=version)
+
+
+def _doc_resolver(doc: IDFDocument) -> AccessorResolver:
+    resolver = doc._accessor_resolver_or_none()
+    assert resolver is not None
+    return resolver
+
+
+def test_every_alias_resolves_through_getattr(version_doc: IDFDocument) -> None:
+    """Plural, singular, raw type name, and every shorthand, via __getattr__."""
+    r = _doc_resolver(version_doc)
+    failures: list[tuple[str, str, str]] = []
+    for obj_type in r.attr_for:
+        singular = snake_case(obj_type)
+        forms = {pluralize(singular), singular, obj_type} - set(r.conflicts)
+        for form in forms:
+            got = getattr(version_doc, form).obj_type
+            if got != obj_type:
+                failures.append((form, obj_type, got))
+    for alias, target in r.shorthands.items():
+        got = getattr(version_doc, alias).obj_type
+        if got != target:
+            failures.append((alias, target, got))
+    assert not failures, f"{len(failures)} (form, expected, got), first 10: {failures[:10]}"
+
+
+def test_no_shorthand_contradicts_a_derived_name(version_doc: IDFDocument) -> None:
+    """A losing shorthand must be deleted from _PYTHON_TO_IDF, not merely overridden.
+
+    The stub generator reads _PYTHON_TO_IDF, so a shorthand left in place would be
+    typed as one object type while runtime returns another.
+    """
+    r = _doc_resolver(version_doc)
+    lost = {a: pair for a, pair in r.conflicts.items() if pair[1] != MEMBER_CONFLICT}
+    assert not lost, f"remove from _PYTHON_TO_IDF: {lost}"
+
+
+def test_member_conflicts_are_known(version_doc: IDFDocument) -> None:
+    r = _doc_resolver(version_doc)
+    members = {a for a, pair in r.conflicts.items() if pair[1] == MEMBER_CONFLICT}
+    # <= rather than ==: a given clash need not exist in every schema version.
+    assert members <= EXPECTED_MEMBER_CONFLICTS, f"new member clashes: {members - EXPECTED_MEMBER_CONFLICTS}"
+
+
+def test_member_conflicts_still_return_the_member(version_doc: IDFDocument) -> None:
+    r = _doc_resolver(version_doc)
+    for name, (_, winner) in r.conflicts.items():
+        if winner == MEMBER_CONFLICT:
+            assert not isinstance(getattr(version_doc, name), IDFCollection), name
+
+
+def test_case_never_changes_which_type_with_shorthands(version_doc: IDFDocument) -> None:
+    """The same guarantee as above, on the resolver the document really uses."""
+    r = _doc_resolver(version_doc)
+    clashes = {k: (r._exact[k], r._raw[k]) for k in r._raw if k in r._exact and r._exact[k] != r._raw[k]}
+    assert not clashes, f"re-casing changes the type: {clashes}"
