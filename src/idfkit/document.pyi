@@ -188,11 +188,11 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
 
         Every object type in the document's schema is reachable this way, as its
         ``snake_case`` plural (``model.air_loop_hvacs``), its singular
-        (``model.air_loop_hvac``), or the raw type name normalised
-        (``model.AirLoopHVAC``).  A hand-written shorthand in ``_PYTHON_TO_IDF``
-        (e.g. ``building_surfaces`` -> ``BuildingSurface:Detailed``,
-        ``ideal_loads`` -> ``ZoneHVAC:IdealLoadsAirSystem``) takes precedence
-        where one exists.
+        (``model.air_loop_hvac``), or the raw type name (``model.AirLoopHVAC``).
+        Hand-written shorthands in ``_PYTHON_TO_IDF`` (e.g. ``building_surfaces``
+        -> ``BuildingSurface:Detailed``, ``ideal_loads`` ->
+        ``ZoneHVAC:IdealLoadsAirSystem``) also resolve, but where one would clash
+        with a name derived from the schema, the derived name wins.
 
         Without a schema loaded, only the hand-written shorthands and a
         case-insensitive match against existing collections are available.
@@ -581,9 +581,6 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def shading_surfaces(self) -> IDFCollection[ShadingSiteDetailed]:
         """All ``Shading:Site:Detailed`` objects in the document. used for shading elements such as trees these items are fixed in space and would not move with relative geometry"""
-    @property
-    def shading_building(self) -> IDFCollection[ShadingBuildingDetailed]:
-        """All ``Shading:Building:Detailed`` objects in the document. used for shading elements such as trees, other buildings, parts of this building not being modeled these items are relative to the current building and would move with relative geometry"""
     @property
     def shading_zone(self) -> IDFCollection[ShadingZoneDetailed]:
         """All ``Shading:Zone:Detailed`` objects in the document. used For fins, overhangs, elements that shade the building, are attached to the building but are not part of the heat transfer calculations"""

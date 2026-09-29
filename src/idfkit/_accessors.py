@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 
 __all__ = [
+    "MEMBER_CONFLICT",
     "AccessorAttributeError",
     "AccessorResolver",
     "pluralize",
@@ -29,6 +30,9 @@ _IRREGULAR_PLURALS = {"people": "people"}
 _SPLIT_BEFORE_WORD = re.compile(r"(.)([A-Z][a-z]+)")
 _SPLIT_AFTER_LOWER = re.compile(r"([a-z0-9])([A-Z])")
 _COLLAPSE = re.compile(r"_+")
+
+MEMBER_CONFLICT = "<IDFDocument member>"
+"""Marker in :attr:`AccessorResolver.conflicts` for a name owned by a real member."""
 
 
 def snake_case(obj_type: str) -> str:
@@ -108,22 +112,73 @@ class AccessorResolver:
     Build once per schema and cache it on the schema (see
     :meth:`~idfkit.schema.EpJSONSchema.accessor_resolver`); construction is
     O(number of object types) and lookup is at most two dict hits.
+
+    Applied precedence:
+
+    1. A real ``IDFDocument`` member always wins, because ``__getattr__`` never
+       fires for it. Any name that collides with one is recorded in ``conflicts``.
+    2. Names derived from the schema win over hand-written shorthands. A shorthand
+       that contradicts a derived name is recorded in ``conflicts`` and dropped.
+    3. Shorthands fill in wherever they do not contradict a derived name.
+
+    Args:
+        obj_types: Every object type in the schema.
+        shorthands: Hand-written attribute names, ``{attribute: object_type}``.
+        reserved: Names owned by real ``IDFDocument`` members.
+
+    Attributes:
+        attr_for: Canonical attribute name for every object type.
+        shorthands: The shorthands that were registered, after clashes were removed.
+        conflicts: Every name claimed twice, as ``{name: (loser, winner)}``.
     """
 
-    def __init__(self, obj_types: Iterable[str]) -> None:
+    def __init__(
+        self,
+        obj_types: Iterable[str],
+        shorthands: Mapping[str, str] | None = None,
+        reserved: Iterable[str] = (),
+    ) -> None:
+        types = list(obj_types)
+        present = set(types)
+        reserved_set = set(reserved)
+
         self.attr_for: dict[str, str] = {}
-        # snake_case plural and singular, matched exactly
+        self.shorthands: dict[str, str] = {}
+        self.conflicts: dict[str, tuple[str, str]] = {}
+        # snake_case plural and singular, plus shorthands, matched exactly
         self._exact: dict[str, str] = {}
         # Raw type names, case-insensitive, with only ':' stripped
         self._raw: dict[str, str] = {}
 
-        for obj_type in obj_types:
+        # Derived names first
+        for obj_type in types:
             singular = snake_case(obj_type)
             plural = pluralize(singular)
             self.attr_for[obj_type] = plural
             for alias in (plural, singular):
+                if alias in reserved_set:
+                    self.conflicts[alias] = (obj_type, MEMBER_CONFLICT)
+                    continue
                 self._exact.setdefault(alias, obj_type)
             self._raw.setdefault(_raw_key(obj_type), obj_type)
+
+        # Shorthands only where they contradict neither a member nor a derived name.
+        for alias, target in (shorthands or {}).items():
+            if target not in present:
+                continue  # exit early if the type does not exist in this schema version
+            if alias in reserved_set:
+                self.conflicts[alias] = (target, MEMBER_CONFLICT)
+                continue
+            derived = self._exact.get(alias)
+            if derived is not None and derived != target:
+                self.conflicts[alias] = (target, derived)
+                continue
+            self._exact[alias] = target
+            self.shorthands[alias] = target
+
+        # Suggestion and completion candidates
+        self._candidates: dict[str, str] = {a: t for t, a in self.attr_for.items() if a not in reserved_set}
+        self._candidates.update(self.shorthands)
 
     def resolve(self, attr: str) -> str | None:
         """Return the object type an attribute name refers to, or ``None``.
@@ -138,8 +193,12 @@ class AccessorResolver:
         return self._raw.get(_raw_key(attr))
 
     def suggest(self, attr: str, n: int = 3) -> list[str]:
-        """Closest canonical attribute names, for an ``AttributeError`` message."""
-        return difflib.get_close_matches(attr.lower(), list(self.attr_for.values()), n=n, cutoff=0.6)
+        """Closest canonical attribute names and shorthands, for an ``AttributeError`` message."""
+        return difflib.get_close_matches(attr.lower(), self._candidates.keys(), n=n, cutoff=0.6)
+
+    def names(self) -> list[str]:
+        """Every canonical attribute name and shorthand, sorted, for ``__dir__``."""
+        return sorted(self._candidates)
 
 
 class AccessorAttributeError(AttributeError):

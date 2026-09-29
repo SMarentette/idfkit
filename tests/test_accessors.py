@@ -14,7 +14,7 @@ import weakref
 import pytest
 
 from idfkit import IDFDocument, new_document
-from idfkit._accessors import AccessorAttributeError, AccessorResolver, pluralize, snake_case
+from idfkit._accessors import MEMBER_CONFLICT, AccessorAttributeError, AccessorResolver, pluralize, snake_case
 from idfkit.objects import IDFCollection
 from idfkit.schema import get_schema, get_schema_manager
 from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
@@ -217,6 +217,66 @@ def test_document_z_o_n_e_does_not_resolve(empty_doc: IDFDocument) -> None:
 @pytest.mark.parametrize("bad", ["z_o_n_e", "zone_", "zone_s", "airloophvacs"])
 def test_document_separator_noise_does_not_resolve(empty_doc: IDFDocument, bad: str) -> None:
     assert not hasattr(empty_doc, bad)
+
+
+def test_derived_name_wins_over_shorthand(empty_doc: IDFDocument) -> None:
+    """#202 review decision: singular and plural of one name must agree."""
+    assert empty_doc.shading_building.obj_type == "Shading:Building"
+    assert empty_doc.shading_buildings.obj_type == "Shading:Building"
+    assert empty_doc.shading_building_detaileds.obj_type == "Shading:Building:Detailed"
+
+
+def test_losing_shorthand_is_recorded_not_registered() -> None:
+    r = AccessorResolver(
+        ["Shading:Building", "Shading:Building:Detailed", "Zone"],
+        shorthands={"shading_building": "Shading:Building:Detailed", "zones": "Zone"},
+    )
+    assert r.conflicts == {"shading_building": ("Shading:Building:Detailed", "Shading:Building")}
+    assert r.shorthands == {"zones": "Zone"}
+    assert r.resolve("shading_building") == "Shading:Building"
+
+
+def test_shorthand_for_a_type_missing_from_the_schema_is_skipped() -> None:
+    r = AccessorResolver(["Zone"], shorthands={"ideal_loads": "ZoneHVAC:IdealLoadsAirSystem"})
+    assert r.resolve("ideal_loads") is None
+    assert "ideal_loads" not in r.names()
+
+
+def test_member_names_are_recorded_and_never_suggested() -> None:
+    r = AccessorResolver(["Version", "Zone"], shorthands={"version": "Version"}, reserved={"version"})
+    assert r.conflicts["version"] == ("Version", MEMBER_CONFLICT)
+    assert "version" not in r.names()
+    assert "versions" in r.names()
+
+
+def test_version_property_is_untouched(empty_doc: IDFDocument) -> None:
+    """A real member always wins; __getattr__ never fires for it."""
+    assert not isinstance(empty_doc.version, IDFCollection)
+    assert empty_doc.versions.obj_type == "Version"
+
+
+def test_suggestions_include_shorthands(empty_doc: IDFDocument) -> None:
+    with pytest.raises(AttributeError, match="ideal_loads"):
+        _ = empty_doc.ideal_load
+
+
+def test_document_without_schema_still_uses_shorthands() -> None:
+    doc = IDFDocument(version=LATEST_VERSION)  # no schema
+    with pytest.raises(AttributeError, match="object has no attribute 'nonsense'"):
+        _ = doc.nonsense
+
+
+def test_probing_an_uninitialised_document_does_not_recurse() -> None:
+    """copy.deepcopy and pickle build the object without __init__, then probe it.
+
+    Without the '_' guard, __getattr__ reaches for self._schema, which is also
+    missing, re-enters __getattr__, and recurses until RecursionError.
+    """
+    blank = IDFDocument.__new__(IDFDocument)
+    assert not hasattr(blank, "__setstate__")
+    assert not hasattr(blank, "_schema")
+    with pytest.raises(AttributeError):
+        _ = blank.zones
 
 
 def test_document_attribute_error_suggests(empty_doc: IDFDocument) -> None:

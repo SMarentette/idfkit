@@ -66,7 +66,6 @@ _PYTHON_TO_IDF = {
     "fenestration_surfaces": "FenestrationSurface:Detailed",
     "internal_mass": "InternalMass",
     "shading_surfaces": "Shading:Site:Detailed",
-    "shading_building": "Shading:Building:Detailed",
     "shading_zone": "Shading:Zone:Detailed",
     "schedules_compact": "Schedule:Compact",
     "schedules_constant": "Schedule:Constant",
@@ -106,13 +105,13 @@ _PYTHON_TO_IDF = {
     "construction_window": "Construction",
 }
 
-# Inverse mapping
+# Inverse mapping, we can probably remove this?
 _IDF_TO_PYTHON = {v.upper(): k for k, v in _PYTHON_TO_IDF.items()}
 
 
 def _build_resolver(schema: EpJSONSchema) -> AccessorResolver:
     """Build the attribute resolver for *schema*; cached on the schema itself."""
-    return AccessorResolver(schema.object_types)
+    return AccessorResolver(schema.object_types, shorthands=_PYTHON_TO_IDF, reserved=_RESERVED)
 
 
 class IDFDocument(EppyDocumentMixin, Generic[Strict]):
@@ -394,11 +393,11 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
 
         Every object type in the document's schema is reachable this way, as its
         ``snake_case`` plural (``model.air_loop_hvacs``), its singular
-        (``model.air_loop_hvac``), or the raw type name normalised
-        (``model.AirLoopHVAC``).  A hand-written shorthand in ``_PYTHON_TO_IDF``
-        (e.g. ``building_surfaces`` -> ``BuildingSurface:Detailed``,
-        ``ideal_loads`` -> ``ZoneHVAC:IdealLoadsAirSystem``) takes precedence
-        where one exists.
+        (``model.air_loop_hvac``), or the raw type name (``model.AirLoopHVAC``).
+        Hand-written shorthands in ``_PYTHON_TO_IDF`` (e.g. ``building_surfaces``
+        -> ``BuildingSurface:Detailed``, ``ideal_loads`` ->
+        ``ZoneHVAC:IdealLoadsAirSystem``) also resolve, but where one would clash
+        with a name derived from the schema, the derived name wins.
 
         Without a schema loaded, only the hand-written shorthands and a
         case-insensitive match against existing collections are available.
@@ -419,15 +418,11 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
             AttributeError: If the name resolves to no object type.  When the
                 schema has a close match the message names it.
         """
+        # Fail fast on private and dunder names
         if name.startswith("_"):
             raise AttributeError(name)
 
-        # A hand-written shorthand wins where one exists.
-        obj_type = _PYTHON_TO_IDF.get(name)
-        if obj_type:
-            return self[obj_type]
-
-        # Schema-driven resolution: any object type, as plural/singular/raw name.
+        # Schema-driven resolution
         resolver = self._accessor_resolver_or_none()
         if resolver is not None:
             resolved = resolver.resolve(name)
@@ -435,12 +430,15 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
                 return self[resolved]
             raise AccessorAttributeError(type(self).__name__, name, resolver)
 
-        # No schema: fall back to a case-insensitive match on existing collections.
+        # No schema: shorthands, then a case-insensitive match on existing collections.
+        obj_type = _PYTHON_TO_IDF.get(name)
+        if obj_type is not None:
+            return self[obj_type]
         for key in self._collections:
             if key.lower().replace(":", "_").replace(" ", "_") == name.lower():
                 return self._collections[key]
 
-        raise AttributeError(f"'{type(self).__name__}' object has no attribute '{name}'")  # noqa: TRY003
+        raise AccessorAttributeError(type(self).__name__, name)
 
     def _accessor_resolver_or_none(self) -> AccessorResolver | None:
         """Return the schema's attribute resolver, or ``None`` without a schema."""
@@ -1375,3 +1373,9 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
             if collection:
                 lines.append(f"  {obj_type}: {len(collection)} objects")
         return "\n".join(lines)
+
+
+# Real members, which an attribute accessor can never reach because __getattr__ does not
+# fire for them. Computed after the class body so dir() sees every one, and from the
+# class rather than an instance, so it never runs an instance __dir__.
+_RESERVED: frozenset[str] = frozenset(dir(IDFDocument))
