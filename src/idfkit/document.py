@@ -447,6 +447,18 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
             return None
         return schema.accessor_resolver(_build_resolver)
 
+    def __dir__(self) -> list[str]:
+        """Return attributes for tab completion, including every object-type accessor.
+
+        Lists one canonical name per object type plus the shorthands, so completion
+        shows ``air_loop_hvacs`` once rather than every spelling that resolves.
+        """
+        names = set(super().__dir__())
+        resolver = self._accessor_resolver_or_none()
+        if resolver is not None:
+            names.update(resolver.names())
+        return sorted(names)
+
     def __contains__(self, obj_type: str) -> bool:
         """Check if document has objects of a type.
 

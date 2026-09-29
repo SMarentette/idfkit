@@ -279,6 +279,37 @@ def test_probing_an_uninitialised_document_does_not_recurse() -> None:
         _ = blank.zones
 
 
+def test_dir_lists_generated_and_shorthand_names(empty_doc: IDFDocument) -> None:
+    names = dir(empty_doc)
+    assert "air_loop_hvacs" in names  # derived from the schema
+    assert "zones" in names  # shorthand
+    assert "shading_building_detaileds" in names
+    assert "air_loop_hvac" not in names  # singular resolves, but is left out of completion
+    assert "AirLoopHVAC" not in names  # so is the raw type name
+
+
+def test_dir_keeps_real_members(empty_doc: IDFDocument) -> None:
+    names = dir(empty_doc)
+    assert "add" in names
+    assert "version" in names
+    assert names == sorted(names)
+
+
+def test_dir_names_all_resolve(empty_doc: IDFDocument) -> None:
+    """Completion must never offer a name that then raises."""
+    resolver = empty_doc._accessor_resolver_or_none()
+    assert resolver is not None
+    for name in resolver.names():
+        assert isinstance(getattr(empty_doc, name), IDFCollection), name
+
+
+def test_dir_without_schema_lists_only_real_members() -> None:
+    doc = IDFDocument(version=LATEST_VERSION)  # no schema
+    names = dir(doc)
+    assert "add" in names
+    assert "air_loop_hvacs" not in names
+
+
 def test_document_attribute_error_suggests(empty_doc: IDFDocument) -> None:
     with pytest.raises(AttributeError, match="Did you mean"):
         _ = empty_doc.zonez
