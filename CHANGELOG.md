@@ -9,16 +9,166 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Every object type in a document's schema is now reachable as an attribute on
-  `IDFDocument`, not just the ~40 hand-written shorthands. `doc.air_loop_hvacs`,
+- **Every object type in a document's schema is now reachable as an attribute on
+  `IDFDocument`, not only the ~40 hand-written shorthands.** `doc.air_loop_hvacs`,
   `doc.coil_cooling_dx_single_speeds`, and `doc.zone_hvac_equipment_connections`
-  all resolve, as does the singular (`doc.air_loop_hvac`) and the raw type name
-  (`doc.AirLoopHVAC`). Names are derived from the schema by rule, with no
-  hardcoded acronym list, so a new EnergyPlus release needs no change. A failed
-  lookup now names the closest matches and their object types instead of a bare
-  `AttributeError`. The hand-written shorthands in `_PYTHON_TO_IDF` are unchanged
-  and still take precedence
-  ([b6be03c](https://github.com/idfkit/idfkit/commit/b6be03c)).
+  all resolve, as do the singular (`doc.air_loop_hvac`) and the raw type name
+  (`doc.AirLoopHVAC`, case-insensitive). Names are derived from the schema by rule,
+  with no hardcoded acronym list, so a new EnergyPlus release needs no change. The
+  names appear in `dir()` and in interactive tab completion. A failed lookup names
+  the closest matches and their object types, and that message is built only when
+  read, so `hasattr()` and `getattr(doc, name, default)` stay fast
+  ([#202](https://github.com/idfkit/idfkit/pull/202)).
+
+### Changed
+
+- **Breaking:** `doc.shading_building` now returns the `Shading:Building`
+  collection, matching `doc.shading_buildings`. It previously returned
+  `Shading:Building:Detailed`, which is now reached as
+  `doc.shading_building_detaileds` or `doc["Shading:Building:Detailed"]`. Where a
+  hand-written shorthand clashes with a name derived from the schema, the derived
+  name now wins; across all 17 bundled schemas this is the only such clash
+  ([#202](https://github.com/idfkit/idfkit/pull/202)).
+
+## [1.0.0-rc.6] - 2026-09-23
+
+This release moves to `conformance-2026.15` and `governance-2026.22`. The corpus
+level changes no case: 69 cases, as `conformance-2026.14` had, and it leaves the
+accepted-divergence register alone. What it adds is `checks/geometry-vertices`,
+seven fixtures compared as rings within 0.005 m over 234 surfaces, whose oracle is
+EnergyPlus's own `Output:Surfaces:List` vertex report. The governance level
+registers the scene description in both languages and moves `geometry-extraction`
+to `partial` on the TypeScript side.
+
+Pinning the corpus level is not enough to run the new check. It has its own entry
+point, as `checks/weather-monthly` does, and `runners/run.py` reaches neither, so
+`conformance.yml` gained a step that invokes it. It runs both resolutions, so the
+older path cannot drift back.
+
+### Added
+
+- **`get_scene(doc)` resolves a model's geometry into one frame without changing the model.** It
+  returns a `Scene` holding every detailed surface it could place in world coordinates, the extent
+  of those vertices as `SceneBounds`, the declarations it read as `AppliedRules`, every object it
+  could not place as an `UnresolvedObject` with a reason, and every geometry type it does not read
+  as an `UnattemptedType` with a count. Every geometry object in the model appears exactly once
+  across the three lists, so a model of surfaces this slice cannot read is distinguishable from a
+  model with no geometry at all. The rule it applies was measured against the engine's own
+  `Output:Surfaces:List` vertex report rather than reasoned, and `idfkit-conformance`'s
+  `checks/geometry-vertices` runs both languages against the same committed expectations. Seven
+  names are exported: `get_scene`, `Scene`, `SceneBounds`, `ResolvedSurface`, `AppliedRules`,
+  `UnresolvedObject` and `UnattemptedType`.
+
+### Fixed
+
+- **The library held three answers about where a surface is, and two of them were wrong.**
+  `idfkit.geometry.translate_to_world` and the 3D renderer's own private resolution each applied a
+  rule that disagrees with EnergyPlus. Measured against the engine's own `Output:Surfaces:List`
+  vertex report over seventeen of the shipped example models and five hundred and thirty-two
+  surfaces, each of those rules agreed with the engine on five of the seventeen models, worst case
+  201.98 m of displacement. Both now resolve through `get_scene`, which agrees on seventeen of
+  seventeen, worst case 0.0045 m against a report that prints two decimals. Three defects account
+  for the difference: the building's north axis was turned per surface inside its own zone frame
+  rather than turning the resolved building as one body about the world origin, and in the opposite
+  sense; the zone origin was applied without being turned by that axis first; and a zone's surfaces
+  were collected by reference, which no window matches, because a window names its parent wall.
+- **`translate_to_world` no longer returns untouched from a model declaring `World`.** The building
+  north axis applies to such a model too. Only the zone origin and the zone's relative north are
+  conditional on the relative system, which is the clause that makes the example models declaring
+  `World` with a non-zero zone origin come out right. A model declaring clockwise vertex entry now
+  has its rings reversed, the first vertex held in place, with `GlobalGeometryRules` restated as
+  counter-clockwise, so the right-hand rule gives the outward normal in the result. The zone fields
+  are cleared only when they were applied, because under the world system they were not and they
+  still govern the simplified surface family and the daylighting reference points.
+- **`Shading:Site:Detailed` is no longer turned by `Building.north_axis`.** Site shading is fixed in
+  space and does not move with the building, which is the whole difference between that object and
+  `Shading:Building:Detailed`: EnergyPlus's own schema separates the two on exactly that sentence,
+  and the two carry identical fields otherwise. A model carrying site shading and a non-zero north
+  axis had every such surface rotated about the world origin by the building's angle. The rule was
+  measured and not merely read: one square from (50, 0) to (60, 0) entered twice, once under each
+  type, into a model declaring a north axis of 158.434 degrees, and EnergyPlus 26.1.0 reports the
+  site form where it was authored and the building form at (-46.50, -18.38) to (-55.80, -22.05).
+  No fixture in `checks/geometry-vertices` holds a detached shading surface of either form, and no
+  shipped example model carries one together with a north axis, so the corpus did not and could not
+  report this; `checks/geometry-vertices/check.md` now records the gap and the measurement.
+- **A shading surface can no longer answer a parent lookup.** The schema declares the `SurfaceNames`
+  reference list, which `building_surface_name` and `base_surface_name` point at, on the heat
+  transfer surfaces and on nothing else, so a shading surface is never anyone's parent. Extraction
+  looked names up across both families, so a `Shading:Site:Detailed` sharing a name with a wall
+  shadowed it, and a window naming that wall resolved against the shading object and came back
+  `zone-not-found` naming a surface where a zone was expected.
+- **A `Building` that states no north axis is recorded as defaulted.** The field was recorded as
+  assumed only when the object was absent entirely, so a model with a blank axis field was resolved
+  under an assumed zero while `AppliedRules.defaulted` reported nothing assumed. A stated zero is
+  still a declaration and is still not recorded.
+- **`translate_to_world` reports the objects it could not rewrite.** An object the scene could not
+  place keeps the vertices the author wrote while the declarations they were written against are
+  restated underneath it, so it is afterwards read in a frame it was never stated in. Each one is
+  now logged at warning level and named with its reason. `get_scene` reports the same objects in
+  `Scene.unresolved` and edits nothing.
+- The generator header written into every IDF file no longer repeats the `v`
+  prefix. Files written by idfkit 1.0.0-rc.5 open with
+  `!-Generator idfkit vv1.0.0-rc.5`; they will open with
+  `!-Generator idfkit v1.0.0rc6` from the next release. `idfkit.__version__` was
+  the malformed half of it, reported as `"v1.0.0-rc.5"` rather than the PEP 440
+  form, so anything parsing it saw the same fault (#212).
+
+
+### Changed
+
+- **`view_model`, `view_floor_plan`, `view_exploded` and `view_normals` draw 218 of the 699 shipped
+  example models differently, and in every case the new drawing is the correct one.** No model
+  changes how many surfaces it draws. 206 move because the north axis was turned per surface, worst
+  case 361.19 m; 10 because a zone origin was applied to a model declaring `World`, worst case
+  201.98 m; one for both, at 87.44 m; and one changes only its ring order, being a model declaring
+  clockwise entry whose surface normals therefore used to point inward. A surface naming a zone the
+  model does not hold is no longer drawn at its authored coordinates: it is reported in the scene's
+  `unresolved` list with the name of the zone that is missing. A shading surface's reported type is
+  now its object type, such as `Shading:Site:Detailed`, rather than the word `Shading`.
+- The release workflow reads the version from `pyproject.toml` instead of
+  writing the tag into it. The two publish paths now produce identical metadata
+  from the same commit, and a release whose manifest and tag disagree fails
+  rather than being silently patched. `scripts/check_release_version.py` decides
+  agreement by PEP 440 equality, so the `v` prefix and the tag's punctuation are
+  not differences, and it can be run before tagging.
+
+
+## [1.0.0-rc.5] - 2026-09-18
+
+This release moves to `conformance-2026.14` and `governance-2026.18`. The corpus
+level changes no case: 69 cases and 211 assertions, as `conformance-2026.12` had.
+What it changes is the accepted-divergence register, which loses four entries. All
+four were the same refusal, recorded against `versions-late-version-object` on
+`parse-outcome`, `epjson`, `round-trip` and `preserved-text`: the read raised, so
+the three downstream assertions had no document to compare and recorded that absence
+rather than a difference of their own. The fix below makes all four pass at once.
+
+That case was written before the bug was found here, and it is worth saying why it
+existed: the corpus had already reduced three real example files to their smallest
+failing form, and its own reasoning named the fix. "Nothing in the IDF format bounds
+where the Version object may appear, so no window is large enough, and the fix is to
+search the whole file rather than to widen the window."
+
+### Fixed
+
+- **A model that states its version late is no longer refused.** Both version
+  detection paths read only the first 10 KB of a file and searched that for the
+  `Version` object. Nothing in the IDF format requires it to appear near the top,
+  and three of the 760 example files shipped with EnergyPlus 26.1.0 carry it past
+  that window, at bytes 16,545, 12,988 and 10,507. All three failed to load with
+  `VersionNotFoundError: Could not detect EnergyPlus version in file`, which names
+  the file rather than the reader:
+  `1ZoneWith14ControlledHeat-CoolPanels.idf`,
+  `EMSCurveOverride_PackagedTerminalHeatPump.idf` and
+  `RefBldgPrimarySchoolNew2004_Chicago.idf`.
+
+  `IDFParser._detect_version` now searches the whole file. It receives content that
+  has already been read in full, so the window discarded data that was in memory
+  and cost nothing to search.
+
+  `get_idf_version` keeps its documented 10 KB fast path and falls back to reading
+  the rest only on a miss, including when the object straddles the boundary. The
+  common case still costs one small read; no valid file is refused.
 
 ## [1.0.0-rc.4] - 2026-09-08
 
@@ -739,6 +889,8 @@ Initial public release.
 - MkDocs Material documentation site with a full API reference, an eppy migration guide, and a getting-started Jupyter notebook. ([#2](https://github.com/idfkit/idfkit/pull/2))
 
 [Unreleased]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.4...HEAD
+[1.0.0-rc.6]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.5...v1.0.0-rc.6
+[1.0.0-rc.5]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.4...v1.0.0-rc.5
 [1.0.0-rc.4]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.3...v1.0.0-rc.4
 [1.0.0-rc.3]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.2...v1.0.0-rc.3
 [1.0.0-rc.2]: https://github.com/idfkit/idfkit/compare/v1.0.0-rc.1...v1.0.0-rc.2
