@@ -13,8 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `IDFDocument`, not only the ~40 hand-written shorthands.** `doc.air_loop_hvacs`,
   `doc.coil_cooling_dx_single_speeds`, and `doc.zone_hvac_equipment_connections`
   all resolve, as do the singular (`doc.air_loop_hvac`) and the raw type name
-  (`doc.AirLoopHVAC`, case-insensitive). Names are derived from the schema by rule,
-  with no hardcoded acronym list, so a new EnergyPlus release needs no change. The
+  (`doc.AirLoopHVAC`, case-insensitive), as well as the spellings that resolved
+  before, such as `doc.Site_Location` and `doc.Output_Variable`. Names are derived
+  from the schema by rule, so a new EnergyPlus release needs no change. The rule
+  splits three of the 870 object types badly, so those are named in a short
+  override table (`Output:SQLite` is `doc.output_sqlite`, not `doc.output_sq_lite`),
+  and a test fails if a release adds a fourth. Singular nouns that end in `s` get a
+  real plural: `doc.window_material_gases`, `doc.humidifier_steam_gases`. The
   names appear in `dir()` and in interactive tab completion. A failed lookup names
   the closest matches and their object types, and that message is built only when
   read, so `hasattr()` and `getattr(doc, name, default)` stay fast

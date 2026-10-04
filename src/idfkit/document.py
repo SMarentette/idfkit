@@ -430,6 +430,11 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
                 return self[resolved]
             raise AccessorAttributeError(type(self).__name__, name, resolver)
 
+        # A real member whose getter raised AttributeError lands here too. Never answer for
+        # it with a collection: that would hide the failure (the schema path does the same).
+        if name in _RESERVED:
+            raise AccessorAttributeError(type(self).__name__, name)
+
         # No schema: shorthands, then a case-insensitive match on existing collections.
         obj_type = _PYTHON_TO_IDF.get(name)
         if obj_type is not None:
@@ -452,12 +457,16 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
 
         Lists one canonical name per object type plus the shorthands, so completion
         shows ``air_loop_hvacs`` once rather than every spelling that resolves.
+        Without a schema only the shorthands are listed, as only they resolve there.
+        ``dir()`` sorts what this returns, so it is not sorted here.
         """
         names = set(super().__dir__())
         resolver = self._accessor_resolver_or_none()
         if resolver is not None:
             names.update(resolver.names())
-        return sorted(names)
+        else:
+            names.update(_PYTHON_TO_IDF.keys() - _RESERVED)
+        return list(names)
 
     def __contains__(self, obj_type: str) -> bool:
         """Check if document has objects of a type.

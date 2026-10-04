@@ -9,12 +9,20 @@ from __future__ import annotations
 import collections
 import gc
 import pickle
+import re
 import weakref
 
 import pytest
 
 from idfkit import IDFDocument, new_document
-from idfkit._accessors import MEMBER_CONFLICT, AccessorAttributeError, AccessorResolver, pluralize, snake_case
+from idfkit._accessors import (
+    _SNAKE_OVERRIDES,
+    MEMBER_CONFLICT,
+    AccessorAttributeError,
+    AccessorResolver,
+    pluralize,
+    snake_case,
+)
 from idfkit.objects import IDFCollection
 from idfkit.schema import get_schema, get_schema_manager
 from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
@@ -41,7 +49,10 @@ from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
             "electric_load_center_storage_li_ion_nmc_battery",
         ),
         ("ElectricLoadCenter:Inverter:PVWatts", "electric_load_center_inverter_pv_watts"),
-        ("Output:SQLite", "output_sq_lite"),
+        # The three types the case-boundary rule splits badly, fixed by _SNAKE_OVERRIDES.
+        ("Output:SQLite", "output_sqlite"),
+        ("Site:GroundTemperature:FCfactorMethod", "site_ground_temperature_fcfactor_method"),
+        ("Daylighting:DELight:ComplexFenestration", "daylighting_delight_complex_fenestration"),
         # The one hyphenated type in the schema -- must be a valid identifier.
         (
             "PhotovoltaicPerformance:EquivalentOne-Diode",
@@ -72,6 +83,10 @@ def test_snake_case(obj_type: str, expected: str) -> None:
         ("output_schedules", "output_schedules"),
         ("convergence_limits", "convergence_limits"),
         ("people", "people"),  # irregular, not 'peoples'
+        # Singular nouns that end in s, which "already plural" would leave alone.
+        ("window_material_gas", "window_material_gases"),
+        ("humidifier_steam_gas", "humidifier_steam_gases"),
+        ("material_property_phase_change_hysteresis", "material_property_phase_change_hystereses"),
     ],
 )
 def test_pluralize(singular: str, expected: str) -> None:
@@ -116,6 +131,24 @@ def test_plural_singular_and_raw_all_resolve(resolver: AccessorResolver) -> None
 def test_raw_name_with_colons_resolves(resolver: AccessorResolver) -> None:
     assert resolver.resolve("Coil:Cooling:DX:SingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
     assert resolver.resolve("CoilCoolingDXSingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
+
+
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        ("Schedule_Compact", "Schedule:Compact"),
+        ("schedule_compact", "Schedule:Compact"),
+        ("SCHEDULE_COMPACT", "Schedule:Compact"),
+        ("AirLoopHVAC_UnitarySystem", "AirLoopHVAC:UnitarySystem"),
+        ("airloophvac_unitarysystem", "AirLoopHVAC:UnitarySystem"),
+        ("Coil_Cooling_DX_SingleSpeed", "Coil:Cooling:DX:SingleSpeed"),
+    ],
+)
+def test_raw_name_with_underscores_for_colons_resolves(
+    resolver: AccessorResolver, spelling: str, expected: str
+) -> None:
+    """These spellings resolved on main through a case-insensitive ':' -> '_' match."""
+    assert resolver.resolve(spelling) == expected
 
 
 @pytest.mark.parametrize(
@@ -214,6 +247,44 @@ def test_document_z_o_n_e_does_not_resolve(empty_doc: IDFDocument) -> None:
         _ = empty_doc.z_o_n_e
 
 
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        # The spellings #202 review found raising once a schema was loaded.
+        ("Site_Location", "Site:Location"),
+        ("Output_Variable", "Output:Variable"),
+        ("BuildingSurface_Detailed", "BuildingSurface:Detailed"),
+        ("SITE_LOCATION", "Site:Location"),
+    ],
+)
+def test_document_underscore_spellings_still_resolve(empty_doc: IDFDocument, spelling: str, expected: str) -> None:
+    assert getattr(empty_doc, spelling).obj_type == expected
+
+
+@pytest.mark.parametrize(
+    ("spelling", "expected"),
+    [
+        ("output_sqlite", "Output:SQLite"),
+        ("output_sqlites", "Output:SQLite"),
+        ("site_ground_temperature_fcfactor_methods", "Site:GroundTemperature:FCfactorMethod"),
+        ("daylighting_delight_complex_fenestrations", "Daylighting:DELight:ComplexFenestration"),
+        ("window_material_gases", "WindowMaterial:Gas"),
+        ("window_material_gas", "WindowMaterial:Gas"),
+        ("humidifier_steam_gases", "Humidifier:Steam:Gas"),
+        ("material_property_phase_change_hystereses", "MaterialProperty:PhaseChangeHysteresis"),
+    ],
+)
+def test_document_naming_cases_from_review(empty_doc: IDFDocument, spelling: str, expected: str) -> None:
+    """The names #202 review found misspelled or missing, and the plural of each."""
+    assert getattr(empty_doc, spelling).obj_type == expected
+
+
+@pytest.mark.parametrize("bad", ["output_sq_lite", "output_sq_lites", "daylighting_de_light_complex_fenestration"])
+def test_document_old_awkward_names_are_gone(empty_doc: IDFDocument, bad: str) -> None:
+    """These never shipped, so the rule's first answer is replaced, not kept as an alias."""
+    assert not hasattr(empty_doc, bad)
+
+
 @pytest.mark.parametrize("bad", ["z_o_n_e", "zone_", "zone_s", "airloophvacs"])
 def test_document_separator_noise_does_not_resolve(empty_doc: IDFDocument, bad: str) -> None:
     assert not hasattr(empty_doc, bad)
@@ -303,11 +374,52 @@ def test_dir_names_all_resolve(empty_doc: IDFDocument) -> None:
         assert isinstance(getattr(empty_doc, name), IDFCollection), name
 
 
-def test_dir_without_schema_lists_only_real_members() -> None:
+def test_dir_without_schema_lists_shorthands_but_not_derived_names() -> None:
+    """Only the shorthands resolve without a schema, so only they are offered."""
     doc = IDFDocument(version=LATEST_VERSION)  # no schema
     names = dir(doc)
     assert "add" in names
+    assert "zones" in names
     assert "air_loop_hvacs" not in names
+    assert names == sorted(names)
+    assert len(names) == len(set(names))
+
+
+def test_dir_has_no_duplicates(empty_doc: IDFDocument) -> None:
+    names = dir(empty_doc)
+    assert len(names) == len(set(names))
+
+
+def test_names_is_sorted_and_the_copy_is_safe_to_mutate(resolver: AccessorResolver) -> None:
+    names = resolver.names()
+    assert names == sorted(names)
+    names.clear()
+    assert resolver.names()  # clearing the copy did not touch the resolver
+
+
+def test_reserved_name_never_resolves_but_other_casing_does() -> None:
+    r = AccessorResolver(["Version", "Zone"], shorthands={"version": "Version"}, reserved={"version"})
+    assert r.resolve("version") is None
+    assert r.resolve("Version") == "Version"  # not the member, so still reachable
+    assert r.resolve("VERSION") == "Version"
+    assert r.resolve("versions") == "Version"
+
+
+def _broken_property(self: object) -> object:
+    raise AttributeError("the getter itself failed")  # noqa: TRY003
+
+
+@pytest.mark.parametrize("with_schema", [True, False])
+def test_failing_member_getter_is_not_masked_by_an_accessor(monkeypatch: pytest.MonkeyPatch, with_schema: bool) -> None:
+    """A property that raises AttributeError falls back to __getattr__, which must not answer.
+
+    Without this, ``doc.version`` would quietly return the ``Version`` collection
+    instead of failing, with or without a schema loaded.
+    """
+    monkeypatch.setattr(IDFDocument, "version", property(_broken_property))
+    doc = new_document(version=LATEST_VERSION) if with_schema else IDFDocument(version=LATEST_VERSION)
+    with pytest.raises(AttributeError):
+        _ = doc.version
 
 
 def test_document_attribute_error_suggests(empty_doc: IDFDocument) -> None:
@@ -367,7 +479,8 @@ def test_every_type_resolves_from_every_alias_form(all_obj_types: list[str]) -> 
     r = AccessorResolver(all_obj_types)
     failures: list[tuple[str, str, str | None]] = []
     for obj_type in all_obj_types:
-        for form in (r.attr_for[obj_type], snake_case(obj_type), obj_type):
+        underscored = obj_type.replace(":", "_")
+        for form in (r.attr_for[obj_type], snake_case(obj_type), obj_type, underscored):
             if r.resolve(form) != obj_type:
                 failures.append((obj_type, form, r.resolve(form)))
     assert not failures, f"{len(failures)} alias failures, first 10: {failures[:10]}"
@@ -377,6 +490,38 @@ def test_case_never_changes_which_type_in_any_schema(all_obj_types: list[str]) -
     r = AccessorResolver(all_obj_types)
     clashes = {k: (r._exact[k], r._raw[k]) for k in r._raw if k in r._exact and r._exact[k] != r._raw[k]}
     assert not clashes, f"re-casing changes the type: {clashes}"
+
+
+# Every "CAPITALS run + lowercase" fragment in any object type, across all bundled
+# schemas. The case-boundary rule splits the last capital off with the lowercase run,
+# which is right when an acronym is followed by a word and wrong when it is not.
+# Adding to this set is a deliberate, reviewed act: check how the new fragment splits,
+# and if it splits badly add the type to _SNAKE_OVERRIDES.
+REVIEWED_ACRONYM_FRAGMENTS = {
+    "HVACTemplate",  # splits correctly: hvac_template
+    "HVACEquipment",  # hvac_equipment
+    "HVACSystem",  # hvac_system
+    "NMCBattery",  # nmc_battery
+    "PVWatts",  # pv_watts
+    "VAVChangeover",  # vav_changeover
+    "SQLite",  # split badly, fixed by _SNAKE_OVERRIDES
+    "DELight",  # split badly, fixed by _SNAKE_OVERRIDES
+    "FCfactor",  # split badly, fixed by _SNAKE_OVERRIDES
+}
+
+
+def test_snake_case_has_no_unreviewed_splits(all_obj_types: list[str]) -> None:
+    found = {m.group(0) for t in all_obj_types for m in re.finditer(r"[A-Z]{2,}[a-z]+", t)}
+    assert found <= REVIEWED_ACRONYM_FRAGMENTS, (
+        f"new acronym fragments to review: {sorted(found - REVIEWED_ACRONYM_FRAGMENTS)}; see REVIEWED_ACRONYM_FRAGMENTS"
+    )
+
+
+def test_snake_case_overrides_name_real_types() -> None:
+    """A typo in the override table would silently do nothing, so check each key exists somewhere."""
+    known = {t for v in ENERGYPLUS_VERSIONS for t in get_schema(v).object_types}
+    missing = sorted(set(_SNAKE_OVERRIDES) - known)
+    assert not missing, f"overrides for types in no bundled schema: {missing}"
 
 
 def test_attribute_names_are_valid_identifiers(all_obj_types: list[str]) -> None:
@@ -430,7 +575,7 @@ def test_every_alias_resolves_through_getattr(version_doc: IDFDocument) -> None:
     failures: list[tuple[str, str, str]] = []
     for obj_type in r.attr_for:
         singular = snake_case(obj_type)
-        forms = {pluralize(singular), singular, obj_type} - set(r.conflicts)
+        forms = {pluralize(singular), singular, obj_type, obj_type.replace(":", "_")} - set(r.conflicts)
         for form in forms:
             got = getattr(version_doc, form).obj_type
             if got != obj_type:

@@ -57,9 +57,9 @@ Any object type in the schema is also reachable as an attribute — its `snake_c
 --8<-- "agent_references/snippets/document-and-objects.py:accessors"
 ```
 
-Names are derived from the schema by rule, with no acronym list, so object types added in a new EnergyPlus release are reachable with no change to idfkit. The canonical plural of every type, plus the shorthands, appears in `dir(doc)` and in IPython, Jupyter, and editor tab completion. Static type checkers type these accessors as `IDFCollection[IDFObject]`.
+Names are derived from the schema by rule, so object types added in a new EnergyPlus release are reachable with no change to idfkit. Three types the rule cannot split are named explicitly (`Output:SQLite` is `doc.output_sqlite`), and singular nouns ending in `s` get a real plural (`doc.window_material_gases`). The canonical plural of every type, plus the shorthands, appears in `dir(doc)` and in IPython, Jupyter, and editor tab completion. Static type checkers type these accessors as `IDFCollection[IDFObject]`.
 
-Resolution is strict about separators: `doc.z_o_n_e`, `doc.zone_`, and `doc.airloophvacs` all raise rather than guess. Case is loose only for the raw type name, matching `doc["ZONE"]`. A name owned by a real member wins over any accessor: `doc.version` is the version tuple, and the `Version` objects are `doc.versions`.
+Resolution is strict about separators: `doc.z_o_n_e`, `doc.zone_`, and `doc.airloophvacs` all raise rather than guess. Case is loose only for the raw type name, matching `doc["ZONE"]`, and the raw name may use `_` in place of `:` (`doc.Site_Location`). A name owned by a real member wins over any accessor: `doc.version` is the version tuple, and the `Version` objects are `doc.versions`.
 
 ## Modifying objects
 

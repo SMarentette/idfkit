@@ -24,8 +24,15 @@ __all__ = [
     "snake_case",
 ]
 
-# Names whose English plural is not formed by rule
-_IRREGULAR_PLURALS = {"people": "people"}
+# Last words whose English plural is not formed by rule
+_IRREGULAR_PLURALS = {"people": "people", "gas": "gases", "hysteresis": "hystereses"}
+
+# Small override for awkward cases
+_SNAKE_OVERRIDES = {
+    "Output:SQLite": "output_sqlite",
+    "Site:GroundTemperature:FCfactorMethod": "site_ground_temperature_fcfactor_method",
+    "Daylighting:DELight:ComplexFenestration": "daylighting_delight_complex_fenestration",
+}
 
 _SPLIT_BEFORE_WORD = re.compile(r"(.)([A-Z][a-z]+)")
 _SPLIT_AFTER_LOWER = re.compile(r"([a-z0-9])([A-Z])")
@@ -53,8 +60,15 @@ def snake_case(obj_type: str) -> str:
 
     The two regexes handle acronyms between them. ``_SPLIT_BEFORE_WORD`` requires a
     lowercase run after the capital, which is what makes ``HVACTemplate`` split as
-    ``HVAC_Template`` rather than ``HVACT_emplate``.
+    ``HVAC_Template`` rather than ``HVACT_emplate``. That rule cannot tell where an
+    acronym ends and a word begins in ``SQLite``, so the three types it gets wrong
+    are named in ``_SNAKE_OVERRIDES``:
+
+    >>> snake_case("Output:SQLite")
+    'output_sqlite'
     """
+    if obj_type in _SNAKE_OVERRIDES:
+        return _SNAKE_OVERRIDES[obj_type]
     s = obj_type.replace(":", "_").replace("-", "_")
     s = _SPLIT_BEFORE_WORD.sub(r"\1_\2", s)
     s = _SPLIT_AFTER_LOWER.sub(r"\1_\2", s)
@@ -76,6 +90,8 @@ def pluralize(singular: str) -> str:
     'internal_masses'
     >>> pluralize("people")          # irregular, not 'peoples'
     'people'
+    >>> pluralize("window_material_gas")   # singular noun ending in s, not already plural
+    'window_material_gases'
     """
     tail = singular.rsplit("_", 1)[-1]
     if tail in _IRREGULAR_PLURALS:
@@ -104,6 +120,23 @@ def _raw_key(obj_type: str) -> str:
     'z_o_n_e'
     """
     return obj_type.replace(":", "").lower()
+
+
+def _underscore_key(obj_type: str) -> str:
+    """Key for a raw type name written with ``_`` where it has ``:``.
+
+    These spellings (``doc.Site_Location``, ``doc.BuildingSurface_Detailed``) resolved
+    before schema-driven accessors existed, through a case-insensitive match that
+    replaced ``:`` and spaces with ``_``. Registering them keeps that match working
+    whether or not a schema is loaded. Underscores already in the name are the only
+    ones kept, so ``z_o_n_e`` still reaches nothing.
+
+    >>> _underscore_key("Site:Location")
+    'site_location'
+    >>> _underscore_key("BuildingSurface:Detailed")
+    'buildingsurface_detailed'
+    """
+    return obj_type.replace(":", "_").replace(" ", "_").lower()
 
 
 class AccessorResolver:
@@ -141,13 +174,14 @@ class AccessorResolver:
         types = list(obj_types)
         present = set(types)
         reserved_set = set(reserved)
+        self._reserved = frozenset(reserved_set)
 
         self.attr_for: dict[str, str] = {}
         self.shorthands: dict[str, str] = {}
         self.conflicts: dict[str, tuple[str, str]] = {}
         # snake_case plural and singular, plus shorthands, matched exactly
         self._exact: dict[str, str] = {}
-        # Raw type names, case-insensitive, with only ':' stripped
+        # Raw type names, case-insensitive, with ':' stripped or replaced by '_'
         self._raw: dict[str, str] = {}
 
         # Derived names first
@@ -161,6 +195,7 @@ class AccessorResolver:
                     continue
                 self._exact.setdefault(alias, obj_type)
             self._raw.setdefault(_raw_key(obj_type), obj_type)
+            self._raw.setdefault(_underscore_key(obj_type), obj_type)
 
         # Shorthands only where they contradict neither a member nor a derived name.
         for alias, target in (shorthands or {}).items():
@@ -179,14 +214,25 @@ class AccessorResolver:
         # Suggestion and completion candidates
         self._candidates: dict[str, str] = {a: t for t, a in self.attr_for.items() if a not in reserved_set}
         self._candidates.update(self.shorthands)
+        # Sorted once here: completion calls names() on every keystroke.
+        self._names = sorted(self._candidates)
 
     def resolve(self, attr: str) -> str | None:
         """Return the object type an attribute name refers to, or ``None``.
 
         Snake_case forms match exactly. Raw type names match case-insensitively,
-        so ``doc.ZONE`` works like ``doc["ZONE"]``, but separator noise such as
-        ``doc.z_o_n_e`` or ``doc.zone_`` does not resolve.
+        written with the ``:`` kept, dropped or replaced by ``_``: ``doc.ZONE``
+        works like ``doc["ZONE"]`` and ``doc.Site_Location`` reaches
+        ``Site:Location``. Separator noise such as ``doc.z_o_n_e`` or
+        ``doc.zone_`` does not resolve.
+
+        A name owned by a real member never resolves, matching what ``conflicts``
+        records. ``__getattr__`` only reaches such a name when the member's own
+        getter raised ``AttributeError``, and answering with an object collection
+        would hide that failure. ``doc.Version`` is not the member, so it still works.
         """
+        if attr in self._reserved:
+            return None
         hit = self._exact.get(attr)
         if hit is not None:
             return hit
@@ -198,7 +244,7 @@ class AccessorResolver:
 
     def names(self) -> list[str]:
         """Every canonical attribute name and shorthand, sorted, for ``__dir__``."""
-        return sorted(self._candidates)
+        return list(self._names)
 
 
 class AccessorAttributeError(AttributeError):
