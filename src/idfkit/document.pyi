@@ -25,6 +25,7 @@ Strict = TypeVar("Strict", bound=bool, default=bool, covariant=True)
 
 _PYTHON_TO_IDF: dict[str, str]
 _IDF_TO_PYTHON: dict[str, str]
+_RESERVED: frozenset[str]
 
 class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: ignore[misc]
     """Main container for an EnergyPlus model.
