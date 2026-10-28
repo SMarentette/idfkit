@@ -23,6 +23,7 @@ from idfkit._accessors import (
     pluralize,
     snake_case,
 )
+from idfkit.document import _PYTHON_TO_IDF, _RESERVED
 from idfkit.objects import IDFCollection
 from idfkit.schema import get_schema, get_schema_manager
 from idfkit.versions import ENERGYPLUS_VERSIONS, LATEST_VERSION
@@ -123,14 +124,15 @@ def test_canonical_attribute_names(resolver: AccessorResolver) -> None:
     assert resolver.attr_for["People"] == "people"
 
 
-def test_plural_singular_and_raw_all_resolve(resolver: AccessorResolver) -> None:
-    for form in ("air_loop_hvacs", "air_loop_hvac", "AirLoopHVAC", "airloophvac", "AIRLOOPHVAC"):
+def test_plural_and_raw_name_resolve(resolver: AccessorResolver) -> None:
+    for form in ("air_loop_hvacs", "AirLoopHVAC", "airloophvac", "AIRLOOPHVAC"):
         assert resolver.resolve(form) == "AirLoopHVAC"
 
 
-def test_raw_name_with_colons_resolves(resolver: AccessorResolver) -> None:
-    assert resolver.resolve("Coil:Cooling:DX:SingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
-    assert resolver.resolve("CoilCoolingDXSingleSpeed") == "Coil:Cooling:DX:SingleSpeed"
+@pytest.mark.parametrize("form", ["air_loop_hvac", "coil_cooling_dx_single_speed", "CoilCoolingDXSingleSpeed"])
+def test_one_derived_spelling_per_type(resolver: AccessorResolver, form: str) -> None:
+    """Only the plural is derived; the singular and the colon-stripped name never resolved on main."""
+    assert resolver.resolve(form) is None
 
 
 @pytest.mark.parametrize(
@@ -197,10 +199,11 @@ def test_attribute_error_is_an_attribute_error(resolver: AccessorResolver) -> No
     assert err.name == "zonez"
 
 
-def test_attribute_error_pickles_as_plain_attribute_error(resolver: AccessorResolver) -> None:
-    """Crossing a process boundary must not fail on the three-argument __init__."""
+def test_attribute_error_pickles_with_class_and_name(resolver: AccessorResolver) -> None:
+    """Crossing a process boundary must not fail on the three-argument __init__, nor lose ``name``."""
     restored = pickle.loads(pickle.dumps(AccessorAttributeError("Document", "zonez", resolver)))  # noqa: S301
-    assert type(restored) is AttributeError
+    assert type(restored) is AccessorAttributeError
+    assert restored.name == "zonez"
     assert "zones" in str(restored)
 
 
@@ -222,7 +225,7 @@ def test_hasattr_never_computes_suggestions(empty_doc: IDFDocument, monkeypatch:
 
 def test_document_resolves_arbitrary_type_by_attribute() -> None:
     doc = new_document(version=LATEST_VERSION)
-    for form in ("air_loop_hvacs", "air_loop_hvac", "AirLoopHVAC"):
+    for form in ("air_loop_hvacs", "AirLoopHVAC"):
         coll = getattr(doc, form)
         assert isinstance(coll, IDFCollection)
     doc.add("AirLoopHVAC", "Main Loop", validate=False)
@@ -290,21 +293,28 @@ def test_document_separator_noise_does_not_resolve(empty_doc: IDFDocument, bad: 
     assert not hasattr(empty_doc, bad)
 
 
-def test_derived_name_wins_over_shorthand(empty_doc: IDFDocument) -> None:
-    """#202 review decision: singular and plural of one name must agree."""
-    assert empty_doc.shading_building.obj_type == "Shading:Building"
+def test_shorthand_keeps_its_meaning(empty_doc: IDFDocument) -> None:
+    """A shorthand that shipped before derived names existed must not change type."""
+    assert empty_doc.shading_building.obj_type == "Shading:Building:Detailed"
     assert empty_doc.shading_buildings.obj_type == "Shading:Building"
     assert empty_doc.shading_building_detaileds.obj_type == "Shading:Building:Detailed"
 
 
-def test_losing_shorthand_is_recorded_not_registered() -> None:
+@pytest.mark.parametrize(("alias", "target"), sorted(_PYTHON_TO_IDF.items()))
+def test_every_shorthand_keeps_its_type(empty_doc: IDFDocument, alias: str, target: str) -> None:
+    if alias in _RESERVED:
+        pytest.skip(f"{alias} is a real member")
+    assert getattr(empty_doc, alias).obj_type == target
+
+
+def test_displaced_derived_name_is_recorded() -> None:
     r = AccessorResolver(
         ["Shading:Building", "Shading:Building:Detailed", "Zone"],
-        shorthands={"shading_building": "Shading:Building:Detailed", "zones": "Zone"},
+        shorthands={"shading_buildings": "Shading:Building:Detailed", "zones": "Zone"},
     )
-    assert r.conflicts == {"shading_building": ("Shading:Building:Detailed", "Shading:Building")}
-    assert r.shorthands == {"zones": "Zone"}
-    assert r.resolve("shading_building") == "Shading:Building"
+    assert r.conflicts == {"shading_buildings": ("Shading:Building", "Shading:Building:Detailed")}
+    assert r.shorthands == {"shading_buildings": "Shading:Building:Detailed", "zones": "Zone"}
+    assert r.resolve("shading_buildings") == "Shading:Building:Detailed"
 
 
 def test_shorthand_for_a_type_missing_from_the_schema_is_skipped() -> None:
@@ -410,6 +420,20 @@ def _broken_property(self: object) -> object:
 
 
 @pytest.mark.parametrize("with_schema", [True, False])
+def test_failing_subclass_member_getter_is_not_masked(with_schema: bool) -> None:
+    """The member check must use the instance's class, not only ``IDFDocument``."""
+
+    class Project(IDFDocument):
+        @property
+        def zones(self) -> IDFCollection:  # pyright: ignore[reportMissingTypeArgument]
+            raise AttributeError("the getter itself failed")  # noqa: TRY003
+
+    doc = Project(version=LATEST_VERSION, schema=get_schema(LATEST_VERSION) if with_schema else None)
+    with pytest.raises(AttributeError):
+        _ = doc.zones
+
+
+@pytest.mark.parametrize("with_schema", [True, False])
 def test_failing_member_getter_is_not_masked_by_an_accessor(monkeypatch: pytest.MonkeyPatch, with_schema: bool) -> None:
     """A property that raises AttributeError falls back to __getattr__, which must not answer.
 
@@ -479,8 +503,7 @@ def test_every_type_resolves_from_every_alias_form(all_obj_types: list[str]) -> 
     r = AccessorResolver(all_obj_types)
     failures: list[tuple[str, str, str | None]] = []
     for obj_type in all_obj_types:
-        underscored = obj_type.replace(":", "_")
-        for form in (r.attr_for[obj_type], snake_case(obj_type), obj_type, underscored):
+        for form in (r.attr_for[obj_type], obj_type.replace(":", "_")):
             if r.resolve(form) != obj_type:
                 failures.append((obj_type, form, r.resolve(form)))
     assert not failures, f"{len(failures)} alias failures, first 10: {failures[:10]}"
@@ -507,6 +530,7 @@ REVIEWED_ACRONYM_FRAGMENTS = {
     "SQLite",  # split badly, fixed by _SNAKE_OVERRIDES
     "DELight",  # split badly, fixed by _SNAKE_OVERRIDES
     "FCfactor",  # split badly, fixed by _SNAKE_OVERRIDES
+    "MRTCalculation",  # mrt_calculation
 }
 
 
@@ -522,6 +546,17 @@ def test_snake_case_overrides_name_real_types() -> None:
     known = {t for v in ENERGYPLUS_VERSIONS for t in get_schema(v).object_types}
     missing = sorted(set(_SNAKE_OVERRIDES) - known)
     assert not missing, f"overrides for types in no bundled schema: {missing}"
+
+
+def test_canonical_names_do_not_change_meaning_between_versions() -> None:
+    """A name must reach the same object type in every bundled schema that has it."""
+    seen: dict[str, set[str]] = collections.defaultdict(set)
+    for version in ENERGYPLUS_VERSIONS:
+        r = AccessorResolver(get_schema(version).object_types)
+        for obj_type, attr in r.attr_for.items():
+            seen[attr].add(obj_type.upper())  # type names are case-insensitive
+    moved = {attr: types for attr, types in seen.items() if len(types) > 1}
+    assert not moved, f"names that change type between versions: {moved}"
 
 
 def test_attribute_names_are_valid_identifiers(all_obj_types: list[str]) -> None:
@@ -570,12 +605,11 @@ def _doc_resolver(doc: IDFDocument) -> AccessorResolver:
 
 
 def test_every_alias_resolves_through_getattr(version_doc: IDFDocument) -> None:
-    """Plural, singular, raw type name, and every shorthand, via __getattr__."""
+    """Plural, raw type name with ``_`` for ``:``, and every shorthand, via __getattr__."""
     r = _doc_resolver(version_doc)
     failures: list[tuple[str, str, str]] = []
     for obj_type in r.attr_for:
-        singular = snake_case(obj_type)
-        forms = {pluralize(singular), singular, obj_type, obj_type.replace(":", "_")} - set(r.conflicts)
+        forms = {r.attr_for[obj_type], obj_type.replace(":", "_")} - set(r.conflicts) - set(r.shorthands)
         for form in forms:
             got = getattr(version_doc, form).obj_type
             if got != obj_type:
@@ -587,11 +621,11 @@ def test_every_alias_resolves_through_getattr(version_doc: IDFDocument) -> None:
     assert not failures, f"{len(failures)} (form, expected, got), first 10: {failures[:10]}"
 
 
-def test_no_shorthand_contradicts_a_derived_name(version_doc: IDFDocument) -> None:
-    """A losing shorthand must be deleted from _PYTHON_TO_IDF, not merely overridden.
+def test_no_shorthand_displaces_a_derived_name(version_doc: IDFDocument) -> None:
+    """A shorthand must not take another type's canonical name.
 
-    The stub generator reads _PYTHON_TO_IDF, so a shorthand left in place would be
-    typed as one object type while runtime returns another.
+    Shorthands win, so such a clash would leave the displaced type with no typed
+    attribute. Rename the shorthand instead.
     """
     r = _doc_resolver(version_doc)
     lost = {a: pair for a, pair in r.conflicts.items() if pair[1] != MEMBER_CONFLICT}
@@ -612,8 +646,14 @@ def test_member_conflicts_still_return_the_member(version_doc: IDFDocument) -> N
             assert not isinstance(getattr(version_doc, name), IDFCollection), name
 
 
+# Shorthands whose re-cased spelling reaches a different type. Both behaviours shipped
+# before derived names existed: doc.shading_building is the detailed type, and
+# doc.Shading_Building matched the Shading:Building collection.
+EXPECTED_CASE_CLASHES = {"shading_building"}
+
+
 def test_case_never_changes_which_type_with_shorthands(version_doc: IDFDocument) -> None:
     """The same guarantee as above, on the resolver the document really uses."""
     r = _doc_resolver(version_doc)
     clashes = {k: (r._exact[k], r._raw[k]) for k in r._raw if k in r._exact and r._exact[k] != r._raw[k]}
-    assert not clashes, f"re-casing changes the type: {clashes}"
+    assert set(clashes) <= EXPECTED_CASE_CLASHES, f"re-casing changes the type: {clashes}"

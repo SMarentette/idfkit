@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import difflib
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 
 __all__ = [
     "MEMBER_CONFLICT",
@@ -106,37 +106,21 @@ def pluralize(singular: str) -> str:
     return singular + "s"
 
 
-def _raw_key(obj_type: str) -> str:
-    """Key for a raw type name used as an attribute.
-
-    Case-insensitive, matching idfkit's own type lookup. Only ``:`` is stripped,
-    never ``_``, so ``z_o_n_e`` cannot reach ``Zone``.
-
-    >>> _raw_key("AirLoopHVAC")
-    'airloophvac'
-    >>> _raw_key("Coil:Cooling:DX:SingleSpeed")
-    'coilcoolingdxsinglespeed'
-    >>> _raw_key("z_o_n_e")
-    'z_o_n_e'
-    """
-    return obj_type.replace(":", "").lower()
-
-
 def _underscore_key(obj_type: str) -> str:
-    """Key for a raw type name written with ``_`` where it has ``:``.
+    """Key for a raw type name written with ``_`` where it has ``:``, case-insensitive.
 
-    These spellings (``doc.Site_Location``, ``doc.BuildingSurface_Detailed``) resolved
-    before schema-driven accessors existed, through a case-insensitive match that
-    replaced ``:`` and spaces with ``_``. Registering them keeps that match working
-    whether or not a schema is loaded. Underscores already in the name are the only
-    ones kept, so ``z_o_n_e`` still reaches nothing.
+    These spellings (``doc.Zone``, ``doc.ZONE``, ``doc.Site_Location``) resolved before
+    schema-driven accessors existed, through a case-insensitive match that replaced
+    ``:`` with ``_``. Registering them keeps that match working whether or not a
+    schema is loaded. Underscores already in the name are the only ones kept, so
+    ``z_o_n_e`` still reaches nothing.
 
     >>> _underscore_key("Site:Location")
     'site_location'
     >>> _underscore_key("BuildingSurface:Detailed")
     'buildingsurface_detailed'
     """
-    return obj_type.replace(":", "_").replace(" ", "_").lower()
+    return obj_type.replace(":", "_").lower()
 
 
 class AccessorResolver:
@@ -150,9 +134,10 @@ class AccessorResolver:
 
     1. A real ``IDFDocument`` member always wins, because ``__getattr__`` never
        fires for it. Any name that collides with one is recorded in ``conflicts``.
-    2. Names derived from the schema win over hand-written shorthands. A shorthand
-       that contradicts a derived name is recorded in ``conflicts`` and dropped.
-    3. Shorthands fill in wherever they do not contradict a derived name.
+    2. Hand-written shorthands win over names derived from the schema, so a
+       shorthand keeps the meaning it had before derived names existed. A derived
+       name that a shorthand displaces is recorded in ``conflicts``.
+    3. Derived names fill in everywhere else.
 
     Args:
         obj_types: Every object type in the schema.
@@ -161,7 +146,7 @@ class AccessorResolver:
 
     Attributes:
         attr_for: Canonical attribute name for every object type.
-        shorthands: The shorthands that were registered, after clashes were removed.
+        shorthands: The shorthands that were registered, after member clashes were removed.
         conflicts: Every name claimed twice, as ``{name: (loser, winner)}``.
     """
 
@@ -179,40 +164,35 @@ class AccessorResolver:
         self.attr_for: dict[str, str] = {}
         self.shorthands: dict[str, str] = {}
         self.conflicts: dict[str, tuple[str, str]] = {}
-        # snake_case plural and singular, plus shorthands, matched exactly
+        # Shorthands and snake_case plurals, matched exactly
         self._exact: dict[str, str] = {}
-        # Raw type names, case-insensitive, with ':' stripped or replaced by '_'
+        # Raw type names, case-insensitive, with ':' replaced by '_'
         self._raw: dict[str, str] = {}
 
-        # Derived names first
-        for obj_type in types:
-            singular = snake_case(obj_type)
-            plural = pluralize(singular)
-            self.attr_for[obj_type] = plural
-            for alias in (plural, singular):
-                if alias in reserved_set:
-                    self.conflicts[alias] = (obj_type, MEMBER_CONFLICT)
-                    continue
-                self._exact.setdefault(alias, obj_type)
-            self._raw.setdefault(_raw_key(obj_type), obj_type)
-            self._raw.setdefault(_underscore_key(obj_type), obj_type)
-
-        # Shorthands only where they contradict neither a member nor a derived name.
+        # Shorthands first, so they keep the meaning they had before derived names existed
         for alias, target in (shorthands or {}).items():
             if target not in present:
-                continue  # exit early if the type does not exist in this schema version
+                continue  # the type does not exist in this schema version
             if alias in reserved_set:
                 self.conflicts[alias] = (target, MEMBER_CONFLICT)
-                continue
-            derived = self._exact.get(alias)
-            if derived is not None and derived != target:
-                self.conflicts[alias] = (target, derived)
                 continue
             self._exact[alias] = target
             self.shorthands[alias] = target
 
+        # Then one derived name per type, where no shorthand or member owns it
+        for obj_type in types:
+            plural = pluralize(snake_case(obj_type))
+            self.attr_for[obj_type] = plural
+            if plural in reserved_set:
+                self.conflicts[plural] = (obj_type, MEMBER_CONFLICT)
+            elif self._exact.get(plural, obj_type) != obj_type:
+                self.conflicts[plural] = (obj_type, self._exact[plural])
+            else:
+                self._exact[plural] = obj_type
+            self._raw.setdefault(_underscore_key(obj_type), obj_type)
+
         # Suggestion and completion candidates
-        self._candidates: dict[str, str] = {a: t for t, a in self.attr_for.items() if a not in reserved_set}
+        self._candidates: dict[str, str] = {a: t for t, a in self.attr_for.items() if a not in self.conflicts}
         self._candidates.update(self.shorthands)
         # Sorted once here: completion calls names() on every keystroke.
         self._names = sorted(self._candidates)
@@ -220,10 +200,10 @@ class AccessorResolver:
     def resolve(self, attr: str) -> str | None:
         """Return the object type an attribute name refers to, or ``None``.
 
-        Snake_case forms match exactly. Raw type names match case-insensitively,
-        written with the ``:`` kept, dropped or replaced by ``_``: ``doc.ZONE``
-        works like ``doc["ZONE"]`` and ``doc.Site_Location`` reaches
-        ``Site:Location``. Separator noise such as ``doc.z_o_n_e`` or
+        Shorthands and snake_case plurals match exactly. Raw type names match
+        case-insensitively, with ``_`` in place of ``:``, as they did before derived
+        names existed: ``doc.ZONE`` works like ``doc["ZONE"]`` and ``doc.Site_Location``
+        reaches ``Site:Location``. Separator noise such as ``doc.z_o_n_e`` or
         ``doc.zone_`` does not resolve.
 
         A name owned by a real member never resolves, matching what ``conflicts``
@@ -236,11 +216,18 @@ class AccessorResolver:
         hit = self._exact.get(attr)
         if hit is not None:
             return hit
-        return self._raw.get(_raw_key(attr))
+        return self._raw.get(attr.lower())
 
     def suggest(self, attr: str, n: int = 3) -> list[str]:
         """Closest canonical attribute names and shorthands, for an ``AttributeError`` message."""
         return difflib.get_close_matches(attr.lower(), self._candidates.keys(), n=n, cutoff=0.6)
+
+    def accessors(self) -> dict[str, str]:
+        """Every canonical attribute name and shorthand with its object type, sorted by name.
+
+        This is what the ``document.pyi`` stub declares as typed properties.
+        """
+        return {name: self._candidates[name] for name in self._names}
 
     def names(self) -> list[str]:
         """Every canonical attribute name and shorthand, sorted, for ``__dir__``."""
@@ -253,8 +240,8 @@ class AccessorAttributeError(AttributeError):
     ``hasattr()`` and ``getattr(obj, name, default)`` catch this without ever
     calling ``__str__``, so the difflib cost is never paid on a silent probe.
 
-    Pickles as a plain ``AttributeError`` carrying the final message, so it
-    survives a trip from a worker process without shipping the resolver.
+    Pickles with the final message and without the resolver, so it survives a trip
+    from a worker process with its class and ``name`` intact.
     """
 
     def __init__(self, owner: str, attr: str, resolver: AccessorResolver | None = None) -> None:
@@ -270,9 +257,15 @@ class AccessorAttributeError(AttributeError):
             self._message = self._build()
         return self._message
 
-    def __reduce__(self) -> tuple[type[AttributeError], tuple[str]]:
+    def __reduce__(self) -> tuple[Callable[[str, str, str], AccessorAttributeError], tuple[str, str, str]]:
         # Rebuilding from self.args would call __init__ with one argument and fail.
-        return (AttributeError, (str(self),))
+        return (AccessorAttributeError._restore, (self._owner, self._attr, str(self)))
+
+    @classmethod
+    def _restore(cls, owner: str, attr: str, message: str) -> AccessorAttributeError:
+        restored = cls(owner, attr)
+        restored._message = message
+        return restored
 
     def _build(self) -> str:
         base = f"{self._owner!r} object has no attribute {self._attr!r}"

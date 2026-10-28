@@ -66,6 +66,7 @@ _PYTHON_TO_IDF = {
     "fenestration_surfaces": "FenestrationSurface:Detailed",
     "internal_mass": "InternalMass",
     "shading_surfaces": "Shading:Site:Detailed",
+    "shading_building": "Shading:Building:Detailed",
     "shading_zone": "Shading:Zone:Detailed",
     "schedules_compact": "Schedule:Compact",
     "schedules_constant": "Schedule:Constant",
@@ -391,13 +392,14 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
         """
         Get collection by Python-style attribute name.
 
-        Every object type in the document's schema is reachable this way, as its
-        ``snake_case`` plural (``model.air_loop_hvacs``), its singular
-        (``model.air_loop_hvac``), or the raw type name (``model.AirLoopHVAC``).
-        Hand-written shorthands in ``_PYTHON_TO_IDF`` (e.g. ``building_surfaces``
-        -> ``BuildingSurface:Detailed``, ``ideal_loads`` ->
-        ``ZoneHVAC:IdealLoadsAirSystem``) also resolve, but where one would clash
-        with a name derived from the schema, the derived name wins.
+        Every object type in the document's schema is reachable this way as its
+        ``snake_case`` plural (``model.air_loop_hvacs``), which the stub types as
+        ``IDFCollection`` of the generated class. Hand-written shorthands in
+        ``_PYTHON_TO_IDF`` (e.g. ``building_surfaces`` -> ``BuildingSurface:Detailed``,
+        ``ideal_loads`` -> ``ZoneHVAC:IdealLoadsAirSystem``) also resolve, and keep
+        their meaning where one coincides with a derived name. The raw type name, with
+        ``_`` in place of ``:`` and in any case (``model.Site_Location``,
+        ``model.ZONE``), resolves as it did before derived names existed.
 
         Without a schema loaded, only the hand-written shorthands and a
         case-insensitive match against existing collections are available.
@@ -422,6 +424,12 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
         if name.startswith("_"):
             raise AttributeError(name)
 
+        # A real member whose getter raised AttributeError lands here too. Never answer for
+        # it with a collection: that would hide the failure. Checked on the instance's own
+        # class so that members a subclass defines are covered as well.
+        if hasattr(type(self), name):
+            raise AccessorAttributeError(type(self).__name__, name)
+
         # Schema-driven resolution
         resolver = self._accessor_resolver_or_none()
         if resolver is not None:
@@ -429,11 +437,6 @@ class IDFDocument(EppyDocumentMixin, Generic[Strict]):
             if resolved is not None:
                 return self[resolved]
             raise AccessorAttributeError(type(self).__name__, name, resolver)
-
-        # A real member whose getter raised AttributeError lands here too. Never answer for
-        # it with a collection: that would hide the failure (the schema path does the same).
-        if name in _RESERVED:
-            raise AccessorAttributeError(type(self).__name__, name)
 
         # No schema: shorthands, then a case-insensitive match on existing collections.
         obj_type = _PYTHON_TO_IDF.get(name)
