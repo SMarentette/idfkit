@@ -14,11 +14,11 @@ import logging
 import os
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+from typing import TYPE_CHECKING, Any, ClassVar, Final, cast
 
 from .exceptions import SchemaNotFoundError
 from .versions import (
@@ -33,6 +33,70 @@ if TYPE_CHECKING:
     from ._accessors import AccessorResolver
 
 logger = logging.getLogger(__name__)
+
+
+#: The two sizing sentinels, folded. A numeric field's schema names at most one of them.
+SIZING_SENTINELS: Final = frozenset({"autosize", "autocalculate"})
+
+#: ``{folded value: the spelling the schema declares}`` for one field.
+ChoiceSpellings = Mapping[str, str]
+
+_NO_SPELLINGS: Final[Mapping[str, ChoiceSpellings]] = MappingProxyType({})
+
+
+def _no_spellings() -> Mapping[str, ChoiceSpellings]:
+    """Return the shared empty spelling table.
+
+    A ``default_factory``, because Python 3.11 refuses an unhashable dataclass default, and
+    ``MappingProxyType`` is hashable only from Python 3.12.
+    """
+    return _NO_SPELLINGS
+
+
+def _string_members(enum: Any) -> list[str]:
+    """The non-empty string members of an ``enum`` value, or none when it is not a list."""
+    if not isinstance(enum, list):
+        return []
+    return [m for m in cast("list[Any]", enum) if isinstance(m, str) and m]
+
+
+def _choice_spellings(field_schema: dict[str, Any]) -> dict[str, str]:
+    """Map each folded choice of a field to the spelling its schema declares; empty when it has none.
+
+    A numeric field whose string branch names one sizing sentinel also maps the other sentinel to it,
+    as ``ConvertInputFormat`` does (idfkit#181).
+    """
+    members = _string_members(field_schema.get("enum"))
+    has_numeric_branch = False
+    raw_branches = field_schema.get("anyOf")
+    branches = cast("list[Any]", raw_branches) if isinstance(raw_branches, list) else []
+    for raw in branches:
+        if not isinstance(raw, dict):
+            continue
+        branch = cast("dict[str, Any]", raw)
+        if branch.get("type") in ("number", "integer"):
+            has_numeric_branch = True
+        elif branch.get("type") == "string":
+            members.extend(_string_members(branch.get("enum")))
+
+    table: dict[str, str] = {}
+    for member in members:
+        table.setdefault(member.casefold(), member)
+    declared = [m for m in members if m.casefold() in SIZING_SENTINELS]
+    if has_numeric_branch and len(declared) == 1:
+        for word in SIZING_SENTINELS:
+            table.setdefault(word, declared[0])
+    return table
+
+
+def _spelling_tables(properties: Mapping[str, Any]) -> Mapping[str, ChoiceSpellings]:
+    """The non-empty spelling tables of a set of field schemas, keyed by field name."""
+    tables = {
+        name: table
+        for name, field_schema in properties.items()
+        if isinstance(field_schema, dict) and (table := _choice_spellings(cast("dict[str, Any]", field_schema)))
+    }
+    return MappingProxyType(tables) if tables else _NO_SPELLINGS
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +118,9 @@ class ParsingCache:
     ext_field_names: tuple[str, ...]
     ext_wrapper_key: str | None
     ext_inner_props: Mapping[str, dict[str, Any]]
+    #: Choice spellings of the positional fields and of one extensible group (idfkit#180).
+    choice_spellings: Mapping[str, ChoiceSpellings] = field(default_factory=_no_spellings)
+    ext_choice_spellings: Mapping[str, ChoiceSpellings] = field(default_factory=_no_spellings)
 
 
 def _resolve_field_type(
@@ -152,6 +219,46 @@ class EpJSONSchema:
         self._object_lists: dict[str, set[str]] = {}
         self._parsing_cache: dict[str, ParsingCache] = {}
         self._build_reference_indexes()
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        """Pickle by version, not by content, when this is the shared schema.
+
+        A document carries its schema, so pickling a document (multiprocessing,
+        joblib, ``copy.deepcopy``) would otherwise carry the full ~4 MB schema
+        with it and come back as a private copy, breaking the one-schema-per-
+        version invariant that :class:`SchemaManager` maintains.  The schema the
+        manager handed out for this version is reconstructed by asking the
+        manager again, which is a cache hit in the same process and a bundled
+        load in a worker.
+
+        A schema the manager does not know about -- built directly from custom
+        schema data -- is pickled by content instead, minus ``_parsing_cache``:
+        that is a rebuildable cache, and its ``MappingProxyType`` entries are
+        the one part of the object pickle cannot handle (#217).
+        """
+        manager = _schema_manager
+        if manager is not None and manager.owns(self):
+            return (get_schema, (self.version,))
+        # Every slot across the MRO, as ``object.__reduce_ex__`` collects them: ``type(self).__slots__``
+        # alone is the most-derived declaration and would hide the base slots under a subclass.
+        state = {
+            name: getattr(self, name)
+            for klass in reversed(type(self).__mro__)
+            for name in klass.__dict__.get("__slots__", ())
+            if name not in ("__weakref__", "_parsing_cache", "_accessor_resolver")
+        }
+        state["_parsing_cache"] = {}
+        state["_accessor_resolver"] = None
+        return (_rebuild_schema, (type(self), state))
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> EpJSONSchema:
+        """A deep copy of a schema is the schema itself.
+
+        One schema per version is the invariant the package relies on, and a schema is read-only
+        once built, so an object graph that holds one -- a document, its objects, a parser -- keeps
+        sharing it under ``copy.deepcopy`` instead of each copy dragging a private clone along.
+        """
+        return self
 
     def _build_reference_indexes(self) -> None:
         """Build indexes for reference and object lists."""
@@ -278,6 +385,10 @@ class EpJSONSchema:
         """
         field_schema = self.get_field_schema(obj_type, field_name)
         if not field_schema:
+            # An extensible field is declared in its wrapper's item schema (idfkit#179)
+            pc = self.get_parsing_cache(obj_type)
+            field_schema = pc.ext_inner_props.get(field_name) if pc is not None else None
+        if not field_schema:
             # Fall back to legacy_idd field_info for extensible fields
             obj_schema = self.get_object_schema(obj_type)
             if obj_schema:
@@ -390,10 +501,8 @@ class EpJSONSchema:
         ext_size = int(obj_schema.get("extensible_size", 0))
         ext_field_names_list: list[str] = legacy.get("extensibles", [])
 
-        # Pre-compute field types and reference fields for extensible base names
+        # Pre-compute reference fields for extensible base names
         for ext_fname in ext_field_names_list:
-            if ext_fname not in field_types:
-                field_types[ext_fname] = _resolve_field_type(ext_fname, props, field_info)
             ext_field_schema = ext_props.get(ext_fname)
             if ext_field_schema is not None and "object_list" in ext_field_schema:
                 ref_fields_set.add(ext_fname)
@@ -426,6 +535,13 @@ class EpJSONSchema:
                     ext_inner_props = {k: cast("dict[str, Any]", v) for k, v in inner.items()}
                     break
 
+        # Type extensible fields from the wrapper's item schema, which declares them; the top level
+        # does not, and the legacy IDD fallback has no integer type (idfkit#179).
+        for ext_fname in ext_field_names_list:
+            if ext_fname not in field_types:
+                type_source = ext_inner_props if ext_fname in ext_inner_props else props
+                field_types[ext_fname] = _resolve_field_type(ext_fname, type_source, field_info)
+
         return ParsingCache(
             obj_schema=obj_schema,
             has_name=has_name,
@@ -438,6 +554,8 @@ class EpJSONSchema:
             ext_field_names=tuple(ext_field_names_list),
             ext_wrapper_key=ext_wrapper_key,
             ext_inner_props=MappingProxyType(ext_inner_props),
+            choice_spellings=_spelling_tables(props),
+            ext_choice_spellings=_spelling_tables(ext_inner_props),
         )
 
     def get_types_providing_reference(self, ref_list: str) -> list[str]:
@@ -846,6 +964,15 @@ class SchemaManager:
             return (major, minor, patch)
         return None
 
+    def owns(self, schema: EpJSONSchema) -> bool:
+        """Whether *schema* is the instance this manager currently hands out for its version.
+
+        Pickling asks this: a schema the manager owns travels by version and is re-resolved through
+        the manager on load, while any other instance travels by content (see
+        :meth:`EpJSONSchema.__reduce__`).
+        """
+        return self._cache.get(schema.version) is schema
+
     def clear_cache(self) -> None:
         """Clear the schema cache."""
         self._cache.clear()
@@ -870,6 +997,14 @@ def get_schema_manager() -> SchemaManager:
     if _schema_manager is None:
         _schema_manager = SchemaManager()
     return _schema_manager
+
+
+def _rebuild_schema(cls: type[EpJSONSchema], state: dict[str, Any]) -> EpJSONSchema:
+    """Unpickle a schema the manager does not own (see :meth:`EpJSONSchema.__reduce__`)."""
+    schema = cls.__new__(cls)
+    for name, value in state.items():
+        setattr(schema, name, value)
+    return schema
 
 
 def get_schema(version: tuple[int, int, int]) -> EpJSONSchema:

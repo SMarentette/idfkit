@@ -24,6 +24,7 @@ from .cst import CSTNode, DocumentCST
 from .document import IDFDocument
 from .exceptions import IDFParseError, ParseDiagnostic, ParseDiagnosticCode, VersionNotFoundError
 from .objects import IDFObject
+from .schema import SIZING_SENTINELS
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +32,10 @@ if TYPE_CHECKING:
     from .schema import EpJSONSchema, ParsingCache
 
 # Regex patterns for parsing
+# Components past the patch are accepted and ignored: DesignBuilder writes
+# ``Version, 23.1.0.002;``, which resolves to 23.1.0 (as idfkit-js does).
 _VERSION_PATTERN = re.compile(
-    rb"VERSION\s*,\s*(\d+)\.(\d+)(?:\.(\d+))?\s*;",
+    rb"VERSION\s*,\s*(\d+)\.(\d+)(?:\.(\d+))?(?:\.\d+)*\s*;",
     re.IGNORECASE,
 )
 
@@ -95,9 +98,11 @@ def _coerce_value_fast(field_type: str | None, value: str) -> Any:
             return value
     if field_type == "integer":
         try:
-            return int(float(value))
+            number = float(value)
         except ValueError:
             return value
+        # A fractional value is kept as written rather than truncated, so validation can report it.
+        return int(number) if number.is_integer() else number
     return value
 
 
@@ -126,7 +131,7 @@ _NUMERIC_FIELD_TYPES: Final = frozenset({"number", "integer"})
 #: the one THIS field documents is a schema-conformance question, and `validate_document` already
 #: answers it: it reports these as E003. Duplicating that here, less accurately, would make the
 #: parse diagnostic noise and teach a reader to ignore it.
-_SIZING_SENTINELS: Final = frozenset({"autosize", "autocalculate"})
+_SIZING_SENTINELS: Final = SIZING_SENTINELS
 
 
 def _string_is_legal(obj_schema: dict[str, Any] | None, field_name: str, value: str) -> bool:
@@ -670,17 +675,17 @@ class IDFParser:
         field_types = pc.field_types
         num_named = len(field_names)
 
-        for i, value in enumerate(remaining_fields):
-            if i < num_named:
-                field_name = field_names[i]
-                if value:
-                    field_type = field_types.get(field_name)
-                    coerced = _coerce_value_fast(field_type, value)
-                    data[field_name] = coerced
-                    if invalid is not None and coerced is value and field_type in _NUMERIC_FIELD_TYPES:
-                        invalid.append((i, field_name, value))
-                else:
-                    data[field_name] = ""
+        # zip stops at the named fields: the extensible tail is bucketed below, not walked here.
+        for i, (field_name, value) in enumerate(zip(field_names, remaining_fields, strict=False)):
+            # A blank field is unset and stays absent, as in epJSON and as the extensible groups below
+            # already do. Holding it as "" made the model disagree with both writers, which drop it,
+            # so a re-parse of idfkit's own output was not equal to the original (idfkit#183).
+            if value:
+                field_type = field_types.get(field_name)
+                coerced = _coerce_value_fast(field_type, value)
+                data[field_name] = coerced
+                if invalid is not None and coerced is value and field_type in _NUMERIC_FIELD_TYPES:
+                    invalid.append((i, field_name, value))
 
         if not pc.extensible and len(remaining_fields) > num_named and self._strict_parsing:
             overflow = len(remaining_fields) - num_named
@@ -734,20 +739,15 @@ class IDFParser:
         items: list[dict[str, Any]] = []
         for group_start in range(0, len(extra), ext_size):
             group = extra[group_start : group_start + ext_size]
-            item: dict[str, Any] = {}
-            has_any = False
-            for j, value in enumerate(group):
-                if j >= num_ext:
-                    continue
-                inner = ext_names[j]
-                if value:
-                    item[inner] = _coerce_value_fast(ext_types[j], value)
-                    has_any = True
-                else:
-                    item[inner] = ""
-            # Drop trailing all-empty groups (e.g. an extra "," at the end of
-            # the extensible block). Keeping them would emit phantom vertices.
-            if has_any:
+            # A blank slot is absent rather than "", as in epJSON; the IDF writer restores it (idfkit#182).
+            item: dict[str, Any] = {
+                ext_names[j]: _coerce_value_fast(ext_types[j], value)
+                for j, value in enumerate(group[:num_ext])
+                if value
+            }
+            # Drop all-empty groups (e.g. an extra "," at the end of the extensible block).
+            # Keeping them would emit phantom vertices.
+            if item:
                 items.append(item)
 
         if items and wrapper_key is not None:

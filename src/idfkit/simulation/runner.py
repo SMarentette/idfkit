@@ -11,10 +11,11 @@ import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, overload
 
 from ..exceptions import SimulationError
 from ._common import (
+    admit_weather,
     build_command,
     ensure_sql_output,
     maybe_preprocess,
@@ -23,21 +24,68 @@ from ._common import (
     resolve_version_mismatch,
     upload_results,
 )
+from .cache import runner_cache_key
 from .progress import ProgressParser, SimulationProgress
 from .progress_bars import resolve_on_progress
 from .result import SimulationResult
 
 if TYPE_CHECKING:
     from ..document import IDFDocument
-    from .cache import CacheKey, SimulationCache
+    from .cache import SimulationCache
     from .fs import FileSystem
 
 logger = logging.getLogger(__name__)
 
 
+@overload
 def simulate(
     model: IDFDocument,
-    weather: str | Path,
+    weather: str | Path | None,
+    *,
+    output_dir: str | Path | None = None,
+    energyplus: EnergyPlusConfig | None = None,
+    expand_objects: bool = True,
+    annual: bool = False,
+    design_day: bool = False,
+    output_prefix: str = "eplus",
+    output_suffix: Literal["C", "L", "D"] = "C",
+    readvars: bool = False,
+    timeout: float = 3600.0,
+    preprocessor_timeout: float | None = None,
+    extra_args: list[str] | None = None,
+    cache: SimulationCache | None = None,
+    fs: FileSystem | None = None,
+    on_progress: Callable[[SimulationProgress], Any] | Literal["tqdm"] | None = None,
+    auto_migrate: bool = False,
+) -> SimulationResult: ...
+
+
+@overload
+def simulate(
+    model: IDFDocument,
+    weather: None = None,
+    *,
+    output_dir: str | Path | None = None,
+    energyplus: EnergyPlusConfig | None = None,
+    expand_objects: bool = True,
+    annual: Literal[False] = False,
+    design_day: Literal[True],
+    output_prefix: str = "eplus",
+    output_suffix: Literal["C", "L", "D"] = "C",
+    readvars: bool = False,
+    timeout: float = 3600.0,
+    preprocessor_timeout: float | None = None,
+    extra_args: list[str] | None = None,
+    cache: SimulationCache | None = None,
+    fs: FileSystem | None = None,
+    on_progress: Callable[[SimulationProgress], Any] | Literal["tqdm"] | None = None,
+    auto_migrate: bool = False,
+) -> SimulationResult: ...
+
+
+def simulate(
+    model: IDFDocument,
+    weather: str | Path | None = None,
     *,
     output_dir: str | Path | None = None,
     energyplus: EnergyPlusConfig | None = None,
@@ -70,7 +118,21 @@ def simulate(
 
     Args:
         model: The EnergyPlus model to simulate.
-        weather: Path to the weather file (.epw).
+        weather: Path to the weather file (.epw), or ``None`` to run without
+            a weather file. ``None`` is accepted only for a design-day-only
+            run (``design_day=True`` and ``annual=False``). A model that
+            contains ``GroundHeatTransfer:Slab:*`` or
+            ``GroundHeatTransfer:Basement:*`` objects requires a weather
+            file when *expand_objects* is ``True`` and
+            ``GroundHeatTransfer:Control`` sets the matching
+            ``run_slab_preprocessor`` or ``run_basement_preprocessor`` field
+            to ``Yes``, because the Slab and Basement preprocessors read it. Without a weather file,
+            a model that contains ``SizingPeriod:WeatherFileDays`` or
+            ``SizingPeriod:WeatherFileConditionType`` fails in EnergyPlus and
+            the result has ``success=False``; a model whose
+            ``Site:WaterMainsTemperature`` uses ``CorrelationFromWeatherFile``
+            completes with one severe error and a fixed mains temperature of
+            10 °C.
         output_dir: Directory for output files (default: auto temp dir).
         energyplus: Pre-configured EnergyPlus installation. If None,
             uses [find_energyplus][idfkit.simulation.config.find_energyplus] for auto-discovery.
@@ -95,7 +157,11 @@ def simulate(
             back to 120 s.  Independent of *timeout* — there is no shared
             wall-clock cap across the pipeline.
         extra_args: Additional command-line arguments.
-        cache: Optional simulation cache for content-hash lookups.
+        cache: Optional simulation cache for content-hash lookups.  The key
+            covers the contents of every file the model names (a
+            ``Schedule:File`` CSV staged into *output_dir*, for example).  A
+            model with a ``PythonPlugin:Instance`` or a co-simulation
+            ``ExternalInterface`` is never cached; a warning is logged.
         fs: Optional file system backend for storing results on remote
             storage (e.g., S3). When provided, ``output_dir`` is required
             and specifies the remote destination path. EnergyPlus runs
@@ -125,7 +191,14 @@ def simulate(
         SimulationResult with paths to output files.
 
     Raises:
-        SimulationError: On timeout, OS error, or missing weather file.
+        SimulationError: On timeout or OS error, or when the weather argument
+            is refused before EnergyPlus starts: *weather* is an empty
+            string; *weather* names a file that does not exist; *weather* is
+            ``None`` and the run is not design-day-only; *weather* is
+            ``None``, *expand_objects* is ``True`` and the model contains
+            Slab or Basement ground heat-transfer objects whose preprocessor
+            ``GroundHeatTransfer:Control`` enables; or *weather* is
+            ``None`` and the run directory already contains ``in.epw``.
         ExpandObjectsError: If a preprocessing step (ExpandObjects, Slab,
             or Basement) fails during automatic preprocessing.
         EnergyPlusNotFoundError: If EnergyPlus cannot be found.
@@ -141,13 +214,19 @@ def simulate(
     progress_cb, progress_cleanup = resolve_on_progress(on_progress)
 
     try:
+        # Admission is a pure argument check, so it runs before EnergyPlus discovery.
+        # When using a remote fs, always run locally in a temp dir
+        local_output_dir = None if fs is not None else output_dir
+        weather_path = admit_weather(
+            weather,
+            model=model,
+            design_day=design_day,
+            annual=annual,
+            expand_objects=expand_objects,
+            run_dir=local_output_dir,
+        )
         config = resolve_config(energyplus)
         logger.debug("EnergyPlus: %s (version %d.%d.%d)", config.executable, *config.version)
-        weather_path = Path(weather).resolve()
-
-        if not weather_path.is_file():
-            msg = f"Weather file not found: {weather_path}"
-            raise SimulationError(msg)
 
         sim_input_model, migration_report = resolve_version_mismatch(
             model=model,
@@ -155,20 +234,25 @@ def simulate(
             auto_migrate=auto_migrate,
         )
 
-        logger.info("Starting simulation with weather %s", weather_path.name)
+        logger.info(
+            "Starting simulation %s",
+            "without a weather file" if weather_path is None else f"with weather {weather_path.name}",
+        )
 
-        cache_key: CacheKey | None = None
-        if cache is not None:
-            cache_key = cache.compute_key(
-                sim_input_model,
-                weather_path,
-                expand_objects=expand_objects,
-                annual=annual,
-                design_day=design_day,
-                output_suffix=output_suffix,
-                readvars=readvars,
-                extra_args=extra_args,
-            )
+        cache_key = runner_cache_key(
+            cache,
+            sim_input_model,
+            weather_path,
+            output_dir=local_output_dir,
+            config=config,
+            expand_objects=expand_objects,
+            annual=annual,
+            design_day=design_day,
+            output_suffix=output_suffix,
+            readvars=readvars,
+            extra_args=extra_args,
+        )
+        if cache is not None and cache_key is not None:
             cached = cache.get(cache_key)
             if cached is not None:
                 logger.debug("Cache hit for key %s", cache_key.hex_digest[:12])
@@ -190,8 +274,6 @@ def simulate(
             preprocessor_timeout=preprocessor_timeout,
         )
 
-        # When using a remote fs, always run locally in a temp dir
-        local_output_dir = None if fs is not None else output_dir
         run_dir = prepare_run_directory(local_output_dir, weather_path)
         idf_path = run_dir / "model.idf"
 
@@ -202,7 +284,7 @@ def simulate(
         cmd = build_command(
             config=config,
             idf_path=idf_path,
-            weather_path=run_dir / weather_path.name,
+            weather_path=None if weather_path is None else run_dir / weather_path.name,
             output_dir=run_dir,
             output_prefix=output_prefix,
             output_suffix=output_suffix,

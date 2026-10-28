@@ -1,7 +1,7 @@
-"""Auto-generated type stub for IDFDocument (EnergyPlus 26.1.0).
+"""Auto-generated type stub for IDFDocument (EnergyPlus 26.2.0).
 
 DO NOT EDIT — regenerate with:
-    python -m idfkit.codegen.generate_stubs 26.1.0
+    python -m idfkit.codegen.generate_stubs 26.2.0
 """
 
 from __future__ import annotations
@@ -540,7 +540,17 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
         """Create a deep copy of the document.
 
         The copy is independent -- modifying the copy does not affect
-        the original.  Strict mode is preserved.
+        the original.  Strict mode is preserved, and so is the source
+        formatting of a ``preserve_formatting=True`` read: the copy writes
+        the same bytes the original would, and :meth:`region_of` and
+        :meth:`render_object` answer for its objects.
+
+        ``copy.deepcopy`` and ``pickle`` give the same result through the
+        default machinery, which needs no hooks here: every slot of a document
+        copies correctly on its own, and the schema travels by version (see
+        :meth:`EpJSONSchema.__reduce__ <idfkit.schema.EpJSONSchema.__reduce__>`).
+        This method is the faster of the two, as it rebuilds the model
+        object by object instead of walking every field through the memo.
 
         Examples:
             Create a copy for parametric comparison (e.g., testing
@@ -1159,6 +1169,9 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     def construction_air_boundaries(self) -> IDFCollection[ConstructionAirBoundary]:
         """All ``Construction:AirBoundary`` objects in the document. Indicates an open boundary between two zones. It may be used for base surfaces and fenestration surfaces. The two adjacent zones are grouped together for solar, daylighting and radiant exchange. Wh..."""
     @property
+    def construction_assignment_sets(self) -> IDFCollection[ConstructionAssignmentSet]:
+        """All ``ConstructionAssignmentSet`` objects in the document. Defines a set of construction assignments for surfaces and sub-surfaces based on their type and outside boundary condition. Can be referenced by Building or Space objects. Space-level assignments t..."""
+    @property
     def construction_cfactor_underground_walls(self) -> IDFCollection[ConstructionCfactorUndergroundWall]:
         """All ``Construction:CfactorUndergroundWall`` objects in the document. Alternate method of describing underground wall constructions"""
     @property
@@ -1365,6 +1378,18 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def electric_equipment(self) -> IDFCollection[ElectricEquipment]:
         """All ``ElectricEquipment`` objects in the document. Sets internal gains for electric equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spaces, and ..."""
+    @property
+    def electric_equipment_definitions(self) -> IDFCollection[ElectricEquipmentDefinition]:
+        """All ``ElectricEquipment:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for electric equipment. Referenced by one or more ElectricEquipment:Instance objects."""
+    @property
+    def electric_equipment_instances(self) -> IDFCollection[ElectricEquipmentInstance]:
+        """All ``ElectricEquipment:Instance`` objects in the document. Sets internal gains for electric equipment in the zone. The physical characteristics are given by the referenced ElectricEquipment:Definition object. If a ZoneList, SpaceList, or a Zone comprised o..."""
+    @property
+    def electric_equipment_ite_air_cooled_definitions(self) -> IDFCollection[ElectricEquipmentITEAirCooledDefinition]:
+        """All ``ElectricEquipment:ITE:AirCooled:Definition`` objects in the document. Performance characteristics for ElectricEquipment:ITE:AirCooled:Instance. Defines power, airflow, and efficiency as functions of loading and temperature."""
+    @property
+    def electric_equipment_ite_air_cooled_instances(self) -> IDFCollection[ElectricEquipmentITEAirCooledInstance]:
+        """All ``ElectricEquipment:ITE:AirCooled:Instance`` objects in the document. This object describes air-cooled electric information technology equipment (ITE) which has variable power consumption as a function of loading and temperature. The performance characteristics are g..."""
     @property
     def electric_equipment_ite_air_cooleds(self) -> IDFCollection[ElectricEquipmentITEAirCooled]:
         """All ``ElectricEquipment:ITE:AirCooled`` objects in the document. This object describes air-cooled electric information technology equipment (ITE) which has variable power consumption as a function of loading and temperature. If a Zone comprised of more than one ..."""
@@ -1680,6 +1705,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     def gas_equipment(self) -> IDFCollection[GasEquipment]:
         """All ``GasEquipment`` objects in the document. Sets internal gains and contaminant rates for gas equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applic..."""
     @property
+    def gas_equipment_definitions(self) -> IDFCollection[GasEquipmentDefinition]:
+        """All ``GasEquipment:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for gas equipment. Referenced by one or more GasEquipment:Instance objects."""
+    @property
+    def gas_equipment_instances(self) -> IDFCollection[GasEquipmentInstance]:
+        """All ``GasEquipment:Instance`` objects in the document. Sets internal gains and contaminant rates for gas equipment in the zone. The physical characteristics are given by the referenced GasEquipment:Definition object. If a ZoneList, SpaceList, or a Zone..."""
+    @property
     def gas_equipments(self) -> IDFCollection[GasEquipment]:
         """All ``GasEquipment`` objects in the document. Sets internal gains and contaminant rates for gas equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applic..."""
     @property
@@ -1926,6 +1957,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     def hot_water_equipment(self) -> IDFCollection[HotWaterEquipment]:
         """All ``HotWaterEquipment`` objects in the document. Sets internal gains for hot water equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spaces, and..."""
     @property
+    def hot_water_equipment_definitions(self) -> IDFCollection[HotWaterEquipmentDefinition]:
+        """All ``HotWaterEquipment:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for hot water equipment. Referenced by one or more HotWaterEquipment:Instance objects."""
+    @property
+    def hot_water_equipment_instances(self) -> IDFCollection[HotWaterEquipmentInstance]:
+        """All ``HotWaterEquipment:Instance`` objects in the document. Sets internal gains for hot water equipment in the zone. The physical characteristics are given by the referenced HotWaterEquipment:Definition object. If a ZoneList, SpaceList, or a Zone comprised ..."""
+    @property
     def hot_water_equipments(self) -> IDFCollection[HotWaterEquipment]:
         """All ``HotWaterEquipment`` objects in the document. Sets internal gains for hot water equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spaces, and..."""
     @property
@@ -2075,6 +2112,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     def lights(self) -> IDFCollection[Lights]:
         """All ``Lights`` objects in the document. Sets internal gains for lights in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spaces, and each instanc..."""
     @property
+    def lights_definitions(self) -> IDFCollection[LightsDefinition]:
+        """All ``Lights:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for lights. Referenced by one or more Lights:Instance objects."""
+    @property
+    def lights_instances(self) -> IDFCollection[LightsInstance]:
+        """All ``Lights:Instance`` objects in the document. Sets internal gains for lights in the zone. The physical characteristics are given by the referenced Lights:Definition object. If a ZoneList, SpaceList, or a Zone comprised of more than one Space i..."""
+    @property
     def load_profile_plants(self) -> IDFCollection[LoadProfilePlant]:
         """All ``LoadProfile:Plant`` objects in the document. Used to simulate a scheduled plant loop demand profile. Load and flow rate are specified using schedules. Positive values are heating loads, and negative values are cooling loads. The actual load m..."""
     @property
@@ -2162,6 +2205,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def node_lists(self) -> IDFCollection[NodeList]:
         """All ``NodeList`` objects in the document. This object is used in places where lists of nodes may be needed, e.g. ZoneHVAC:EquipmentConnections field Zone Air Inlet Node or NodeList Name"""
+    @property
+    def other_equipment_definitions(self) -> IDFCollection[OtherEquipmentDefinition]:
+        """All ``OtherEquipment:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for 'other' equipment. Referenced by one or more OtherEquipment:Instance objects."""
+    @property
+    def other_equipment_instances(self) -> IDFCollection[OtherEquipmentInstance]:
+        """All ``OtherEquipment:Instance`` objects in the document. Sets internal gains or losses for 'other' equipment in the zone. The physical characteristics are given by the referenced OtherEquipment:Definition object. If a ZoneList, SpaceList, or a Zone compr..."""
     @property
     def other_equipments(self) -> IDFCollection[OtherEquipment]:
         """All ``OtherEquipment`` objects in the document. Sets internal gains or losses for 'other' equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spa..."""
@@ -2288,6 +2337,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def people(self) -> IDFCollection[People]:
         """All ``People`` objects in the document. Sets internal gains and contaminant rates for occupants in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable..."""
+    @property
+    def people_definitions(self) -> IDFCollection[PeopleDefinition]:
+        """All ``People:Definition`` objects in the document. Defines the physical characteristics (number of people, heat gain fractions, CO2 generation rate and thermal comfort model selections) for occupants. Referenced by one or more People:Instance objects."""
+    @property
+    def people_instances(self) -> IDFCollection[PeopleInstance]:
+        """All ``People:Instance`` objects in the document. Sets internal gains and contaminant rates for occupants in the zone. The physical characteristics are given by the referenced People:Definition object. If a ZoneList, SpaceList, or a Zone comprised..."""
     @property
     def performance_precision_tradeoffs(self) -> IDFCollection[PerformancePrecisionTradeoffs]:
         """All ``PerformancePrecisionTradeoffs`` objects in the document. This object enables users to choose certain options that speed up EnergyPlus simulation, but may lead to small decreases in accuracy of results."""
@@ -2586,6 +2641,12 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def schedule_week_dailies(self) -> IDFCollection[ScheduleWeekDaily]:
         """All ``Schedule:Week:Daily`` objects in the document. A Schedule:Week:Daily contains 12 Schedule:Day:Hourly objects, one for each day type."""
+    @property
+    def schedule_week_rules(self) -> IDFCollection[ScheduleWeekRule]:
+        """All ``Schedule:Week:Rule`` objects in the document. A Schedule:Week:Rule defines one override rule for a Schedule:Year:Rules. Rules are evaluated in ascending Rule Priority Order; the first matching rule wins. A rule matches a day if: (a) the day fa..."""
+    @property
+    def schedule_year_rules(self) -> IDFCollection[ScheduleYearRules]:
+        """All ``Schedule:Year:Rules`` objects in the document. A Schedule:Year:Rules defines a yearly schedule using a default day profile and a prioritized list of override rules (Schedule:Week:Rule objects). Rules are evaluated in ascending Rule Priority Ord..."""
     @property
     def schedule_years(self) -> IDFCollection[ScheduleYear]:
         """All ``Schedule:Year`` objects in the document. A Schedule:Year contains from 1 to 52 week schedules"""
@@ -2919,8 +2980,20 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     def spaces(self) -> IDFCollection[Space]:
         """All ``Space`` objects in the document. Defines a space (room) in the building. All Spaces are part of a Zone. Every Zone contains one or more spaces. Space is an optional input. If a Zone has no Space(s) specified in input then a defaul..."""
     @property
+    def steam_equipment_definitions(self) -> IDFCollection[SteamEquipmentDefinition]:
+        """All ``SteamEquipment:Definition`` objects in the document. Defines the physical characteristics (design level and heat gain fractions) for steam equipment. Referenced by one or more SteamEquipment:Instance objects."""
+    @property
+    def steam_equipment_instances(self) -> IDFCollection[SteamEquipmentInstance]:
+        """All ``SteamEquipment:Instance`` objects in the document. Sets internal gains for steam equipment in the zone. The physical characteristics are given by the referenced SteamEquipment:Definition object. If a ZoneList, SpaceList, or a Zone comprised of more..."""
+    @property
     def steam_equipments(self) -> IDFCollection[SteamEquipment]:
         """All ``SteamEquipment`` objects in the document. Sets internal gains for steam equipment in the zone. If a ZoneList, SpaceList, or a Zone comprised of more than one Space is specified then this definition applies to all applicable spaces, and eac..."""
+    @property
+    def sub_surface_construction_assignments(self) -> IDFCollection[SubSurfaceConstructionAssignments]:
+        """All ``SubSurfaceConstructionAssignments`` objects in the document. Defines construction assignments for each sub-surface type for a single boundary-condition category (exterior or interior). The generic Window type (kept for backward compatibility) resolves via th..."""
+    @property
+    def surface_construction_assignments(self) -> IDFCollection[SurfaceConstructionAssignments]:
+        """All ``SurfaceConstructionAssignments`` objects in the document. Defines construction assignments for the three opaque surface types (Floor, Wall, Roof/Ceiling) for a single boundary-condition category (exterior, interior, or ground-contact)."""
     @property
     def surface_contaminant_source_and_sink_generic_boundary_layer_diffusions(
         self,
@@ -3517,6 +3590,9 @@ class IDFDocument(_ObjectTypeMap, EppyDocumentMixin, Generic[Strict]):  # type: 
     @property
     def zone_mixings(self) -> IDFCollection[ZoneMixing]:
         """All ``ZoneMixing`` objects in the document. ZoneMixing is a simple air exchange from one zone or space to another. Note that this statement only affects the energy balance of the 'receiving' zone or space and will not produce any effect on t..."""
+    @property
+    def zone_mrt_calculations(self) -> IDFCollection[ZoneMRTCalculation]:
+        """All ``ZoneMRTCalculation`` objects in the document. Blends MRT values calculated for People instances into one Zone MRT. The weighting factors must sum to a value from 0.0 through 1.0. Only one ZoneMRTCalculation object is allowed for each Zone. All..."""
     @property
     def zone_property_local_environments(self) -> IDFCollection[ZonePropertyLocalEnvironment]:
         """All ``ZoneProperty:LocalEnvironment`` objects in the document. This object defines the local environment properties of a zone object. A corresponding outdoor air node should be defined and linked to the zone object."""

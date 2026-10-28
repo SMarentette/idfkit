@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from conftest import InMemoryFileSystem
+from conftest import REFUSAL_R2, InMemoryFileSystem
 
 from idfkit import LATEST_VERSION, new_document
-from idfkit.simulation.batch import BatchResult, SimulationJob, simulate_batch
+from idfkit.simulation.batch import REFUSED_RUN_DIR, BatchResult, SimulationJob, simulate_batch
 from idfkit.simulation.cache import SimulationCache
 from idfkit.simulation.config import EnergyPlusConfig
 from idfkit.simulation.result import SimulationResult
@@ -83,6 +84,13 @@ class TestSimulationJob:
         assert job.label == "test-job"
         assert job.annual is True
         assert job.extra_args == ("--custom",)
+
+    def test_weather_defaults_to_none(self) -> None:
+        assert SimulationJob(model=new_document()).weather is None
+
+    def test_positional_weather(self) -> None:
+        job = SimulationJob(new_document(), "w.epw")
+        assert job.weather == "w.epw"
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +250,28 @@ class TestSimulateBatch:
         assert mock_run.call_count == 1  # no additional call
 
     @patch("idfkit.simulation.runner.subprocess.run")
+    def test_cache_follows_staged_file_content(
+        self, mock_run: MagicMock, mock_config: EnergyPlusConfig, weather_file: Path, tmp_path: Path
+    ) -> None:
+        """A job's staged Schedule:File CSV is part of its cache key (#216)."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        cache = SimulationCache(cache_dir=tmp_path / "cache")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        csv = run_dir / "hourly.csv"
+        model = new_document()
+        model.add("Schedule:File", "Staged", file_name="hourly.csv", column_number=1, validate=False)
+        job = SimulationJob(model=model, weather=weather_file, output_dir=run_dir)
+
+        csv.write_text("1\n")
+        simulate_batch([job], energyplus=mock_config, cache=cache)
+        simulate_batch([job], energyplus=mock_config, cache=cache)
+        assert mock_run.call_count == 1
+        csv.write_text("2\n")
+        simulate_batch([job], energyplus=mock_config, cache=cache)
+        assert mock_run.call_count == 2
+
+    @patch("idfkit.simulation.runner.subprocess.run")
     def test_total_runtime_populated(
         self, mock_run: MagicMock, mock_config: EnergyPlusConfig, weather_file: Path
     ) -> None:
@@ -290,3 +320,64 @@ class TestSimulateBatch:
             simulate_batch(jobs, energyplus=mock_config)
 
         assert cleanup_called
+
+
+class TestSimulateBatchWithoutWeather:
+    """Batches that mix jobs with and without a weather file."""
+
+    @patch("idfkit.simulation.runner.subprocess.run")
+    def test_mixed_batch(self, mock_run: MagicMock, mock_config: EnergyPlusConfig, weather_file: Path) -> None:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        jobs = [
+            SimulationJob(model=new_document(), weather=weather_file, label="with-weather"),
+            SimulationJob(model=new_document(), design_day=True, label="design-day"),
+        ]
+        result = simulate_batch(jobs, energyplus=mock_config, max_workers=1)
+        assert result.all_succeeded
+        commands = [c[0][0] for c in mock_run.call_args_list]
+        assert sorted("-w" in cmd for cmd in commands) == [False, True]
+
+    @patch("idfkit.simulation.runner.subprocess.run")
+    def test_annual_job_without_weather_fails_alone(
+        self, mock_run: MagicMock, mock_config: EnergyPlusConfig, weather_file: Path
+    ) -> None:
+        mock_run.return_value = MagicMock(returncode=0, stdout="ok", stderr="")
+        jobs = [
+            SimulationJob(model=new_document(), weather=weather_file, label="with-weather"),
+            SimulationJob(model=new_document(), design_day=True, label="design-day"),
+            SimulationJob(model=new_document(), annual=True, label="annual"),
+        ]
+        result = simulate_batch(jobs, energyplus=mock_config)
+        assert result[0].success
+        assert result[1].success
+        assert not result[2].success
+        assert REFUSAL_R2 in result[2].stderr
+        assert mock_run.call_count == 2
+
+    def test_refused_job_creates_no_directory(
+        self, mock_config: EnergyPlusConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A job refused before EnergyPlus runs leaves no temporary directory behind (#228)."""
+        temp_root = tmp_path / "tmp"
+        temp_root.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(temp_root))
+        jobs = [SimulationJob(model=new_document(), annual=True, label=f"annual-{i}") for i in range(3)]
+        result = simulate_batch(jobs, energyplus=mock_config)
+        assert not any(r.success for r in result)
+        assert list(temp_root.iterdir()) == []
+        assert all(r.run_dir == REFUSED_RUN_DIR for r in result)
+        assert not REFUSED_RUN_DIR.exists()
+        assert result[0].errors.fatal_count == 0
+
+    def test_refused_result_ignores_files_at_placeholder(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Files another process put at the shared placeholder path are never read as outputs (#228)."""
+        placeholder = tmp_path / "idfkit-refused-job"
+        placeholder.mkdir()
+        (placeholder / "eplusout.err").write_text("   ** Fatal  ** planted\n")
+        monkeypatch.setattr("idfkit.simulation.result.REFUSED_RUN_DIR", placeholder)
+        result = SimulationResult(
+            run_dir=placeholder, success=False, exit_code=None, stdout="", stderr="refused", runtime_seconds=0.0
+        )
+        assert result.err_path is None
+        assert result.errors.fatal_count == 0
+        assert result.sql is None
