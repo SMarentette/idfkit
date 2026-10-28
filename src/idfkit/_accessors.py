@@ -191,9 +191,9 @@ class AccessorResolver:
                 self._exact[plural] = obj_type
             self._raw.setdefault(_underscore_key(obj_type), obj_type)
 
-        # Suggestion and completion candidates
-        self._candidates: dict[str, str] = {a: t for t, a in self.attr_for.items() if a not in self.conflicts}
-        self._candidates.update(self.shorthands)
+        # Suggestion and completion candidates: exactly the names that resolve exactly, so a
+        # derived name that wins a collision with another derived name is still listed.
+        self._candidates: dict[str, str] = dict(self._exact)
         # Sorted once here: completion calls names() on every keystroke.
         self._names = sorted(self._candidates)
 

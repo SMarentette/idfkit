@@ -682,10 +682,15 @@ class EpJSONSchema:
         The resolver lives on the schema so it is released with it: dropping a
         schema from the manager's cache frees its resolver too. ``build`` is
         passed in so this module needs no runtime import of the accessor code.
+
+        The slot is read with a default because a schema unpickled from state
+        written before the slot existed does not have it set.
         """
-        if self._accessor_resolver is None:
-            self._accessor_resolver = build(self)
-        return self._accessor_resolver
+        resolver: AccessorResolver | None = getattr(self, "_accessor_resolver", None)
+        if resolver is None:
+            resolver = build(self)
+            self._accessor_resolver = resolver
+        return resolver
 
     def __contains__(self, obj_type: str) -> bool:
         """Check if an object type exists in the schema."""

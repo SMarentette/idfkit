@@ -317,6 +317,30 @@ def test_displaced_derived_name_is_recorded() -> None:
     assert r.resolve("shading_buildings") == "Shading:Building:Detailed"
 
 
+def test_winner_of_a_derived_name_collision_is_still_listed() -> None:
+    """Two types deriving one plural: the winner resolves, so it must be listed and suggested too."""
+    r = AccessorResolver(["Lights", "Light"])
+    assert r.conflicts == {"lights": ("Light", "Lights")}
+    assert r.resolve("lights") == "Lights"
+    assert r.accessors() == {"lights": "Lights"}
+    assert r.suggest("lightz") == ["lights"]
+
+
+def test_schema_unpickled_from_state_without_the_resolver_slot() -> None:
+    """State written before ``_accessor_resolver`` existed leaves the slot unset; the resolver still builds."""
+    from idfkit.document import _build_resolver
+    from idfkit.schema import EpJSONSchema, _rebuild_schema
+
+    schema = get_schema(LATEST_VERSION)
+    state = {
+        name: getattr(schema, name)
+        for name in EpJSONSchema.__slots__
+        if name not in ("__weakref__", "_accessor_resolver")
+    }
+    rebuilt = _rebuild_schema(EpJSONSchema, state)
+    assert rebuilt.accessor_resolver(_build_resolver).resolve("zones") == "Zone"
+
+
 def test_shorthand_for_a_type_missing_from_the_schema_is_skipped() -> None:
     r = AccessorResolver(["Zone"], shorthands={"ideal_loads": "ZoneHVAC:IdealLoadsAirSystem"})
     assert r.resolve("ideal_loads") is None
